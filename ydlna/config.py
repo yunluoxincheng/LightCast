@@ -34,7 +34,7 @@ DEFAULTS: dict[str, Any] = {
     # 窗口几何（x, y, w, h），None 表示用系统默认
     "window_geometry": None,
     # 窗口默认尺寸版本标记（每次调整默认尺寸时 +1，首次启动重置一次旧几何）
-    "window_geometry_v3": False,
+    "window_geometry_v4": False,
     # 是否已提示过「关闭即最小化到托盘」
     "minimize_hint_shown": False,
 }

@@ -59,12 +59,19 @@ class MainWindow(MSFluentWindow):
         )
 
         self.setWindowTitle(APP_DISPLAY_NAME)
-        # 默认 16:9 窗口（1152×648）；版本号升级时用新默认替换一次旧几何，
-        # 之后恢复记忆用户手动调整的尺寸/位置
-        self.resize(1152, 648)
+        # 默认 ~1500×1000（3:2 长方形）；屏幕不够大时按比例收缩。
+        # 版本号升级时用新默认替换一次旧几何，之后恢复记忆用户手动尺寸
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen()
+        w, h = 1500, 1000
+        if screen is not None:
+            avail = screen.availableGeometry()
+            w = min(w, avail.width() - 60)
+            h = min(h, avail.height() - 80)
+        self.resize(w, h)
         self.setMinimumSize(900, 600)
-        if not config.get("window_geometry_v3", False):
-            config.set("window_geometry_v3", True)
+        if not config.get("window_geometry_v4", False):
+            config.set("window_geometry_v4", True)
         else:
             geom = config.get("window_geometry")
             if isinstance(geom, list) and len(geom) == 4:
