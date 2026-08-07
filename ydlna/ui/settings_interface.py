@@ -175,9 +175,11 @@ class SettingsInterface(QWidget):
         current = self._config.get("audio_device", "")
         self.audioDeviceCombo.blockSignals(True)
         self.audioDeviceCombo.clear()
-        self.audioDeviceCombo.addItem(tr("settings.audio_device.default"), "")
+        # 注意：qfluentwidgets 的 ComboBox.addItem(text, icon=None, userData=None)，
+        # 与 QComboBox 不同，userData 是第三个参数（第二个是 icon）
+        self.audioDeviceCombo.addItem(tr("settings.audio_device.default"), None, "")
         for name, desc in self._player.get_audio_devices():
-            self.audioDeviceCombo.addItem(desc, name)
+            self.audioDeviceCombo.addItem(desc, None, name)
         idx = self.audioDeviceCombo.findData(current)
         self.audioDeviceCombo.setCurrentIndex(idx if idx >= 0 else 0)
         self.audioDeviceCombo.blockSignals(False)
