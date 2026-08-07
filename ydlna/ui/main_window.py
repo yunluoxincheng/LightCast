@@ -59,19 +59,22 @@ class MainWindow(MSFluentWindow):
         )
 
         self.setWindowTitle(APP_DISPLAY_NAME)
-        # 默认 ~1500×1000（3:2 长方形）；屏幕不够大时按比例收缩。
-        # 版本号升级时用新默认替换一次旧几何，之后恢复记忆用户手动尺寸
+        # 目标 ~1500×1000 屏幕物理像素（用户以屏幕像素理解窗口尺寸）。
+        # Qt 的 resize 用的是逻辑像素（与 DPI 无关），须按屏幕缩放换算：
+        # 125% 缩放 → 1500px 物理 = 1200 逻辑单位，显示出来才和预期一致。
+        # 屏幕物理区域不够大时按可用区收缩；几何版本号升级时替换一次旧几何
         from PySide6.QtWidgets import QApplication
         screen = QApplication.primaryScreen()
-        w, h = 1500, 1000
+        dpr = screen.devicePixelRatio() if screen is not None else 1.0
+        phys_w, phys_h = 1500, 1000
         if screen is not None:
             avail = screen.availableGeometry()
-            w = min(w, avail.width() - 60)
-            h = min(h, avail.height() - 80)
-        self.resize(w, h)
+            phys_w = min(phys_w, int(avail.width() * dpr) - 60)
+            phys_h = min(phys_h, int(avail.height() * dpr) - 80)
+        self.resize(int(phys_w / dpr), int(phys_h / dpr))
         self.setMinimumSize(900, 600)
-        if not config.get("window_geometry_v4", False):
-            config.set("window_geometry_v4", True)
+        if not config.get("window_geometry_v5", False):
+            config.set("window_geometry_v5", True)
         else:
             geom = config.get("window_geometry")
             if isinstance(geom, list) and len(geom) == 4:
