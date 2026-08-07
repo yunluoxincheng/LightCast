@@ -1,22 +1,20 @@
-"""播放器页面（纯控制台）—— 不再内嵌 mpv 渲染区。
+"""播放器页面（内嵌 mpv 渲染区 + 悬浮控制栏）。
 
-架构变更
---------
-mpv 的原生 HWND 渲染区放在独立的 ``PlayerWindow``（顶层窗口，脱离主窗口 widget 树），
-避免原生窗口与 MSFluentWindow 的 QStackedWidget 导航栈产生 z-order 冲突。
+架构
+----
+- MpvWidget（原生窗口）嵌入本页面，占主体
+- ControlBar（独立浮层窗口）悬浮在页面底部内侧——不占布局（画面比例不变）、
+  独立窗口盖在原生渲染区之上（可点击）
+- 页面切换处理：本页 hide 时强制 mpvWidget.hide()（防止原生窗口刺穿到其它
+  导航页造成 UI 残留）；show 时恢复
 
-本页面只负责：
-- 显示当前媒体信息（标题 / URL / 播放状态）
-- 提供播放控制（进度条 / 播放暂停 / 停止 / 音量）—— 这些按钮调 Player，Player 控制
-  独立 PlayerWindow 里的 mpv
-- 空状态提示（「等待投屏」）
-- 「显示/隐藏播放窗口」按钮（让用户控制独立窗口的可见性）
+投屏到达时由 app.py 切换到本页。
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFrame,
@@ -40,8 +38,9 @@ from qfluentwidgets import (
 
 from ..i18n import tr, Translator
 from ..logger import get_logger
+from .control_bar import ControlBar
 from .mpv_player import Player
-from ..ui.media_controls import MediaControls
+from .mpv_widget import MpvWidget
 
 if TYPE_CHECKING:
     pass
@@ -50,12 +49,9 @@ log = get_logger("ui.player")
 
 
 class PlayerInterface(QWidget):
-    """播放器控制台页面（无内嵌渲染区）。"""
+    """播放器页面（内嵌渲染区 + 悬浮控制栏）。"""
 
-    # 用户通过 UI 播放/暂停（同步托盘等）
     stateChanged = Signal(str)
-    # 请求显示/隐藏独立播放窗口
-    togglePlayerWindowRequested = Signal(bool)  # True=显示, False=隐藏
 
     def __init__(self, player: Player, parent=None) -> None:  # noqa: ANN001
         super().__init__(parent)
@@ -71,109 +67,178 @@ class PlayerInterface(QWidget):
     # ------------------------------------------------------------------ #
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(36, 24, 36, 24)
-        root.setSpacing(14)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # 顶部：标题 + 媒体信息
-        self.titleLabel = TitleLabel(tr("player.empty"))
-        self.statusLabel = BodyLabel("")
-        self.statusLabel.setEnabled(False)
-        header = QVBoxLayout()
-        header.setSpacing(2)
-        header.addWidget(self.titleLabel)
-        header.addWidget(self.statusLabel)
-        root.addLayout(header)
-
-        # 中部：状态卡片（空状态提示 / 媒体信息），无原生窗口
-        self.tipCard = CardWidget(self)
-        tip_lay = QVBoxLayout(self.tipCard)
-        tip_lay.setContentsMargins(24, 20, 24, 20)
-        tip_lay.setSpacing(10)
-        tip_lay.setAlignment(Qt.AlignCenter)
-
-        self.tipIcon = IconWidget(
-            FIF.CAST_DESKTOP if hasattr(FIF, "CAST_DESKTOP") else FIF.VIDEO
+        # 顶部信息条（媒体标题 / 空状态提示）
+        self.header = QFrame(self)
+        self.header.setObjectName("playerHeader")
+        self.header.setStyleSheet(
+            "#playerHeader { background: #1a1a1a; border-bottom: 1px solid #2a2a2a; }"
         )
-        self.tipIcon.setFixedSize(56, 56)
-        self.tipTitle = SubtitleLabel(tr("player.empty"))
-        self.tipTitle.setAlignment(Qt.AlignCenter)
-        self.tipHint = BodyLabel(tr("player.empty.hint"))
-        self.tipHint.setEnabled(False)
-        self.tipHint.setWordWrap(True)
-        self.tipHint.setAlignment(Qt.AlignCenter)
+        header_lay = QHBoxLayout(self.header)
+        header_lay.setContentsMargins(20, 10, 20, 10)
 
-        tip_lay.addWidget(self.tipIcon, 0, Qt.AlignCenter)
-        tip_lay.addWidget(self.tipTitle, 0, Qt.AlignCenter)
-        tip_lay.addWidget(self.tipHint, 0, Qt.AlignCenter)
-
-        # 阴影
-        shadow = QGraphicsDropShadowEffect(self.tipCard)
-        shadow.setBlurRadius(24)
-        shadow.setColor(QColor(0, 0, 0, 90))
-        shadow.setOffset(0, 4)
-        self.tipCard.setGraphicsEffect(shadow)
-
-        root.addWidget(self.tipCard, 1)
-
-        # 播放窗口控制按钮
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
+        self.titleLabel = TitleLabel(tr("player.empty"))
+        self.titleLabel.setStyleSheet("color: #e0e0e0; font-size: 16px;")
         self.showWindowButton = PrimaryPushButton(FIF.LINK, tr("player.show_window"))
         self.showWindowButton.setEnabled(False)
-        btn_row.addWidget(self.showWindowButton)
-        btn_row.addStretch(1)
-        root.addLayout(btn_row)
+        self.showWindowButton.clicked.connect(self._toggle_controls)
+        header_lay.addWidget(self.titleLabel, 1)
+        header_lay.addWidget(self.showWindowButton)
+        root.addWidget(self.header)
 
-        # 底部控制条
-        self.controls = MediaControls(self._player, self)
-        root.addWidget(self.controls)
+        # 中部：mpv 渲染区（占满）
+        self.mpvWidget = MpvWidget(self._player, self)
+        self.mpvWidget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        root.addWidget(self.mpvWidget, 1)
+
+        # 空状态覆盖层（悬浮在渲染区之上，投屏后隐藏）
+        self.emptyWidget = self._build_empty(self)
+        self.emptyWidget.setGeometry(0, 0, 1, 1)  # 初始小几何，由 resizeEvent 校正
+        self.emptyWidget.hide()
+
+        # 独立浮层控制栏（悬浮，不占布局）
+        self.controlBar = ControlBar(self._player)
+        self.controlBar.attach_to(self)
+        self.controlBar.fullscreenRequested.connect(self._on_fullscreen_requested)
+        self.mpvWidget.mouseActivity.connect(self._show_controls)
+        self.controlBar.activity.connect(self._show_controls)
+
+        # 自动隐藏定时器
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.setInterval(3000)
+        self._hide_timer.timeout.connect(self._hide_controls)
+        self._hide_timer.start()
+
+    def _build_empty(self, parent) -> QWidget:  # noqa: ANN001
+        w = QWidget(parent)
+        w.setStyleSheet("background: #141414;")
+        lay = QVBoxLayout(w)
+        lay.setAlignment(Qt.AlignCenter)
+        lay.setSpacing(12)
+
+        icon = IconWidget(FIF.VIDEO, w)
+        icon.setFixedSize(64, 64)
+        self.emptyTitle = SubtitleLabel(tr("player.empty"))
+        self.emptyTitle.setAlignment(Qt.AlignCenter)
+        self.emptyHint = BodyLabel(tr("player.empty.hint"))
+        self.emptyHint.setEnabled(False)
+        self.emptyHint.setWordWrap(True)
+        self.emptyHint.setAlignment(Qt.AlignCenter)
+
+        lay.addWidget(icon, 0, Qt.AlignCenter)
+        lay.addWidget(self.emptyTitle, 0, Qt.AlignCenter)
+        lay.addWidget(self.emptyHint, 0, Qt.AlignCenter)
+        return w
 
     def _connect(self) -> None:
-        self.controls.seekRequested.connect(self._player.seek)
-        self.controls.playPauseRequested.connect(self._player.play_pause)
-        self.controls.stopRequested.connect(self._player.stop)
-        self.controls.volumeRequested.connect(self._player.set_volume)
-        self.controls.muteRequested.connect(self._player.set_mute)
-
         s = self._player.signals
         s.mediaChanged.connect(self._on_media_changed)
         s.stateChanged.connect(self._on_state_changed)
         s.errorOccurred.connect(self._on_error)
+    def _toggle_controls(self) -> None:
+        if self.controlBar.isVisible():
+            self.controlBar.hide()
+        else:
+            self._show_controls()
 
-        self.showWindowButton.clicked.connect(lambda: self.togglePlayerWindowRequested.emit(True))
+    # ------------------------------------------------------------------ #
+    # 页面切换（关键：原生窗口的 hide/show 管理）
+    # ------------------------------------------------------------------ #
+    def showEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().showEvent(event)
+        # 延迟到布局完成后恢复渲染区 + attach
+        QTimer.singleShot(0, self._on_page_shown)
+
+    def hideEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().hideEvent(event)
+        # 关键：切到其它导航页时强制隐藏原生窗口，防止 z-order 刺穿残留
+        self.mpvWidget.hide()
+        self.controlBar.hide()
+
+    def _on_page_shown(self) -> None:
+        self.mpvWidget.show()
+        self.mpvWidget.attach_player()
+        # 有媒体时显示播放画面，否则显示空状态
+        if self._player.get_duration() is None:
+            self._show_empty()
+        else:
+            self._hide_empty()
+        self._position_overlays()
+        if self._player.get_state() == "playing":
+            self._hide_timer.start()
+
+    # ------------------------------------------------------------------ #
+    # 覆盖层定位（空状态 + 控制栏）
+    # ------------------------------------------------------------------ #
+    def resizeEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().resizeEvent(event)
+        self._position_overlays()
+
+    def _position_overlays(self) -> None:
+        """把空状态覆盖层铺满渲染区；控制栏按页面底部定位。"""
+        # 空状态覆盖层 = 渲染区几何（含 header 下方）
+        r = self.mpvWidget.geometry()
+        self.emptyWidget.setGeometry(r)
+        self.controlBar.update_position()
+
+    # ------------------------------------------------------------------ #
+    # 控制栏显示/隐藏
+    # ------------------------------------------------------------------ #
+    def _show_controls(self) -> None:
+        if not self.controlBar.isVisible():
+            self.controlBar.show()
+            self.controlBar.update_position()
+        self._hide_timer.start()
+
+    def _hide_controls(self) -> None:
+        if self._player.get_state() == "playing":
+            self.controlBar.hide()
+
+    def _show_empty(self) -> None:
+        self.emptyWidget.show()
+        self.emptyWidget.raise_()
+
+    def _hide_empty(self) -> None:
+        self.emptyWidget.hide()
+
+    # ------------------------------------------------------------------ #
+    # 全屏请求（由 MainWindow/app 处理：主窗口全屏 + 隐藏导航）
+    # ------------------------------------------------------------------ #
+    def _on_fullscreen_requested(self) -> None:
+        self.toggleFullscreenRequested.emit()
+
+    toggleFullscreenRequested = Signal()
 
     # ------------------------------------------------------------------ #
     # 槽
     # ------------------------------------------------------------------ #
     def _on_media_changed(self, title: str, url: str) -> None:
-        display = title or tr("player.unknown_title")
-        self.titleLabel.setText(display)
-        self.statusLabel.setText(url)
+        self.titleLabel.setText(title or tr("player.unknown_title"))
         self.showWindowButton.setEnabled(True)
-        self.tipTitle.setText(display)
-        self.tipHint.setText(url)
+        self._hide_empty()
+        self._show_controls()
 
     def _on_state_changed(self, state: str) -> None:
         self.stateChanged.emit(state)
-        if state == "idle" and self._player.get_duration() is None:
-            # 回到空闲
-            self.titleLabel.setText(tr("player.empty"))
-            self.statusLabel.setText("")
-            self.tipTitle.setText(tr("player.empty"))
-            self.tipHint.setText(tr("player.empty.hint"))
+        if state == "playing":
+            self._hide_empty()
+            self._hide_timer.start()
+        elif state == "idle" and self._player.get_duration() is None:
+            self._show_empty()
 
     def _on_error(self, msg: str) -> None:
-        self.statusLabel.setText(msg)
+        self.titleLabel.setText(msg)
 
     # ------------------------------------------------------------------ #
     # 国际化
     # ------------------------------------------------------------------ #
     def _retranslate(self, *_args) -> None:
+        self.emptyTitle.setText(tr("player.empty"))
+        self.emptyHint.setText(tr("player.empty.hint"))
         self.showWindowButton.setText(tr("player.show_window"))
-        if self._player.get_state() == "idle" and self._player.get_duration() is None:
-            self.titleLabel.setText(tr("player.empty"))
-            self.tipTitle.setText(tr("player.empty"))
-            self.tipHint.setText(tr("player.empty.hint"))
 
     def retranslate_ui(self) -> None:
         self._retranslate()

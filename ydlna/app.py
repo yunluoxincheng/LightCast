@@ -89,23 +89,19 @@ async def run() -> int:
     # UI
     window = MainWindow(player, server, config)
     tray = TrayIcon(player, window)
-    # 独立播放窗口（承载 mpv 原生渲染，脱离主窗口 widget 树，避免 z-order 冲突）
-    from .player.player_window import PlayerWindow
-    player_window = PlayerWindow(player)
 
     # 状态总线
     signals = _AppSignals()
 
     # ---- 连接 ----
-    # DLNA 投屏到达 → 显示独立播放窗口并确保在最前
+    # DLNA 投屏到达 → 切到播放器页（内嵌渲染区）
     def on_cast(title: str, url: str) -> None:
         log.info("投屏到达: %s", url)
-        player_window.show()
-        player_window.raise_()
-        player_window.activateWindow()
-        # 主窗口（frameless）有特殊置顶行为，可能盖住播放窗；
-        # 投屏时隐藏主窗口，只显示播放窗（用户可点托盘图标唤回主窗口）
-        window.hide()
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        window.switch_to_player()
+        window.playerInterface._show_controls()
         signals.castReceived.emit(title, url)
 
     # player 的 mediaChanged 同时通知投屏到达
@@ -139,31 +135,27 @@ async def run() -> int:
     tray.actStop.triggered.connect(player.stop)
     tray.actQuit.triggered.connect(app.quit)
 
-    # 播放器页 → 独立播放窗口的控制信号
-    window.playerInterface.togglePlayerWindowRequested.connect(
-        lambda show: (player_window.showNormal(), player_window.raise_()) if show else player_window.hide()
-    )
+    # 播放器页的全屏请求 → 主窗口全屏（隐藏导航栏）
+    window.playerInterface.toggleFullscreenRequested.connect(window.toggle_fullscreen)
 
     # 显示窗口 + 托盘
     window.show()
     tray.show()
 
-    # 关键：先把独立播放窗口 show 出来拿到 HWND，再 attach mpv。
-    # 注意：attach 后保持窗口可见（不 hide）——Windows 上原生 HWND 被 hide 后
-    # mpv 的 GPU 渲染会挂起，导致投屏后画面不出来。attach 完成后用户可手动
-    # 关闭窗口（仅隐藏），下次投屏到达会重新 show。
-
+    # 关键：先切到播放器页让 MpvWidget 显示并拿到 HWND，再 attach mpv。
     def _ensure_mpv_ready():
-        # 先 show 拿到 HWND（必须真正显示过 winId 才有效）
-        player_window.show()
-        player_window.raise_()
-        player_window.activateWindow()
-        ok = player_window.attach_mpv()
+        # 确保渲染区已显示（winId 才有效）；切回初始页（默认主页）
+        window.switch_to_player()
+        window.playerInterface._on_page_shown()
+        ok = window.playerInterface.mpvWidget.attach_player()
         if ok:
             log.info("mpv 已就绪（投屏可立即播放）")
-            # 不再立即 hide：保持可见，等用户关闭或投屏到达
+            # 切回主页，等投屏到达再自动切到播放器页
+            try:
+                window.switchTo(window.homeInterface)
+            except Exception:  # noqa: BLE001
+                pass
         else:
-            # HWND 尚未就绪，再等一拍重试
             QTimer.singleShot(300, _ensure_mpv_ready)
 
     QTimer.singleShot(100, _ensure_mpv_ready)

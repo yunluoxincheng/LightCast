@@ -182,17 +182,29 @@ class ControlBar(QWidget):
         self._anchor = anchor
 
     def update_position(self) -> None:
-        """按锚点窗口当前位置刷新自己的几何。
+        """按锚点 widget 的屏幕位置刷新自己的几何。
 
-        全屏时锚点窗口的 x/y 可能含系统边框偏移（如 x=7），
-        用 frameGeometry 拿到真实屏幕位置，避免控制栏错位露出边。
+        锚点可以是独立窗口（PlayerWindow）或导航页里的页面（PlayerInterface）：
+        - 窗口：frameGeometry 有屏幕坐标
+        - 页面：mapToGlobal 换算到屏幕坐标（考虑主窗口位置）
         """
         if self._anchor is None or not self.isVisible():
             return
-        fg = self._anchor.frameGeometry()
-        x = fg.x()
-        w = fg.width()
-        y = fg.y() + fg.height() - BAR_HEIGHT
+        a = self._anchor
+        # 页面（无独立 frame）用 mapToGlobal；窗口用 frameGeometry
+        try:
+            if a.window() is not None and a.window() is not a:
+                # 锚点是某个窗口内的子 widget（页面）
+                top_left = a.mapToGlobal(a.rect().topLeft())
+                w = a.width()
+                y = top_left.y() + a.height() - BAR_HEIGHT
+                x = top_left.x()
+            else:
+                fg = a.frameGeometry()
+                x, w = fg.x(), fg.width()
+                y = fg.y() + fg.height() - BAR_HEIGHT
+        except Exception:  # noqa: BLE001
+            return
         self.setGeometry(x, y, w, BAR_HEIGHT)
 
     # ------------------------------------------------------------------ #

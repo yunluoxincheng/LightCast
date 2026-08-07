@@ -74,6 +74,9 @@ class MainWindow(MSFluentWindow):
         if not icon.isNull():
             self.setWindowIcon(icon)
 
+        # 页面切换的原生窗口 hide/show 由 PlayerInterface 的
+        # showEvent/hideEvent 自行处理（QStackedWidget 切换会触发这两个事件）
+
         Translator.instance().languageChanged.connect(self._on_language_changed)
 
     def _load_icon(self) -> QIcon:
@@ -92,6 +95,24 @@ class MainWindow(MSFluentWindow):
             self.switchTo(self.playerInterface)
         except Exception:  # noqa: BLE001
             self.playerInterface.show()
+
+    # ------------------------------------------------------------------ #
+    # 全屏（隐藏导航栏 + 标题栏，播放器页占满）
+    # ------------------------------------------------------------------ #
+    def toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+            self.navigationInterface.show()
+            if hasattr(self, "titleBar"):
+                self.titleBar.show()
+        else:
+            # 先切到播放器页
+            self.switch_to_player()
+            self.navigationInterface.hide()
+            if hasattr(self, "titleBar"):
+                self.titleBar.hide()
+            self.showFullScreen()
+        self.playerInterface._position_overlays()
 
     def refresh_device_info(self, name: str, ip: str) -> None:
         self.homeInterface.update_device_info(name, ip)
