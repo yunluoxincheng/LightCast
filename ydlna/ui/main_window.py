@@ -97,7 +97,7 @@ class MainWindow(MSFluentWindow):
             self.playerInterface.show()
 
     # ------------------------------------------------------------------ #
-    # 全屏（隐藏导航栏 + 标题栏，播放器页占满）
+    # 全屏（隐藏导航栏 + 标题栏 + 播放器页 header，播放器页占满）
     # ------------------------------------------------------------------ #
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():
@@ -105,12 +105,16 @@ class MainWindow(MSFluentWindow):
             self.navigationInterface.show()
             if hasattr(self, "titleBar"):
                 self.titleBar.show()
+            # 恢复播放器页 header（标题栏）
+            self.playerInterface.header.show()
         else:
             # 先切到播放器页
             self.switch_to_player()
             self.navigationInterface.hide()
             if hasattr(self, "titleBar"):
                 self.titleBar.hide()
+            # 隐藏播放器页 header（避免全屏时露出标题/按钮）
+            self.playerInterface.header.hide()
             self.showFullScreen()
         self.playerInterface._position_overlays()
 

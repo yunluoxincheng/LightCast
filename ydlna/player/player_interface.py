@@ -30,7 +30,6 @@ from qfluentwidgets import (
     CardWidget,
     FluentIcon as FIF,
     IconWidget,
-    PrimaryPushButton,
     StrongBodyLabel,
     SubtitleLabel,
     TitleLabel,
@@ -81,11 +80,7 @@ class PlayerInterface(QWidget):
 
         self.titleLabel = TitleLabel(tr("player.empty"))
         self.titleLabel.setStyleSheet("color: #e0e0e0; font-size: 16px;")
-        self.showWindowButton = PrimaryPushButton(FIF.LINK, tr("player.show_window"))
-        self.showWindowButton.setEnabled(False)
-        self.showWindowButton.clicked.connect(self._toggle_controls)
         header_lay.addWidget(self.titleLabel, 1)
-        header_lay.addWidget(self.showWindowButton)
         root.addWidget(self.header)
 
         # 中部：mpv 渲染区（占满）
@@ -98,11 +93,17 @@ class PlayerInterface(QWidget):
         self.emptyWidget.setGeometry(0, 0, 1, 1)  # 初始小几何，由 resizeEvent 校正
         self.emptyWidget.hide()
 
-        # 独立浮层控制栏（悬浮，不占布局）
+        # 独立浮层控制栏（悬浮，不占布局；归属主窗口，不置顶）
         self.controlBar = ControlBar(self._player)
+        # 页面加入主窗口后，把控制栏归属到主窗口（Qt.Tool + parent 随主窗口
+        # 最小化/隐藏，且不会覆盖其它应用）
+        top = self.window()
+        if top is not self:
+            self.controlBar.setParent(top)
         self.controlBar.attach_to(self)
         self.controlBar.fullscreenRequested.connect(self._on_fullscreen_requested)
         self.mpvWidget.mouseActivity.connect(self._show_controls)
+        self.mpvWidget.mouseDoubleClicked.connect(self._on_fullscreen_requested)
         self.controlBar.activity.connect(self._show_controls)
 
         # 自动隐藏定时器
@@ -138,11 +139,6 @@ class PlayerInterface(QWidget):
         s.mediaChanged.connect(self._on_media_changed)
         s.stateChanged.connect(self._on_state_changed)
         s.errorOccurred.connect(self._on_error)
-    def _toggle_controls(self) -> None:
-        if self.controlBar.isVisible():
-            self.controlBar.hide()
-        else:
-            self._show_controls()
 
     # ------------------------------------------------------------------ #
     # 页面切换（关键：原生窗口的 hide/show 管理）
@@ -169,6 +165,8 @@ class PlayerInterface(QWidget):
         self._position_overlays()
         if self._player.get_state() == "playing":
             self._hide_timer.start()
+        # 让页面获得焦点以接收键盘快捷键
+        self.setFocus()
 
     # ------------------------------------------------------------------ #
     # 覆盖层定位（空状态 + 控制栏）
@@ -213,11 +211,42 @@ class PlayerInterface(QWidget):
     toggleFullscreenRequested = Signal()
 
     # ------------------------------------------------------------------ #
+    # 键盘/鼠标快捷键
+    # ------------------------------------------------------------------ #
+    def keyPressEvent(self, event) -> None:  # noqa: N802, ANN001
+        from PySide6.QtGui import QKeyEvent
+        if not isinstance(event, QKeyEvent):
+            return super().keyPressEvent(event)
+        self._show_controls()
+        key = event.key()
+        if key == Qt.Key_Escape:
+            self.toggleFullscreenRequested.emit()  # MainWindow 会判断是否退出全屏
+        elif key == Qt.Key_F:
+            self.toggleFullscreenRequested.emit()
+        elif key == Qt.Key_Space:
+            self._player.play_pause()
+        elif key == Qt.Key_Right:
+            self._player.seek_relative(10)
+        elif key == Qt.Key_Left:
+            self._player.seek_relative(-10)
+        elif key == Qt.Key_Up:
+            self._player.set_volume(min(100, self._player.get_volume() + 5))
+        elif key == Qt.Key_Down:
+            self._player.set_volume(max(0, self._player.get_volume() - 5))
+        else:
+            super().keyPressEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802, ANN001
+        # 点击页面获得键盘焦点（快捷键才能生效）
+        self.setFocus()
+        self._show_controls()
+        super().mousePressEvent(event)
+
+    # ------------------------------------------------------------------ #
     # 槽
     # ------------------------------------------------------------------ #
     def _on_media_changed(self, title: str, url: str) -> None:
         self.titleLabel.setText(title or tr("player.unknown_title"))
-        self.showWindowButton.setEnabled(True)
         self._hide_empty()
         self._show_controls()
 
@@ -238,7 +267,7 @@ class PlayerInterface(QWidget):
     def _retranslate(self, *_args) -> None:
         self.emptyTitle.setText(tr("player.empty"))
         self.emptyHint.setText(tr("player.empty.hint"))
-        self.showWindowButton.setText(tr("player.show_window"))
+        self.titleLabel.setText(tr("player.empty"))
 
     def retranslate_ui(self) -> None:
         self._retranslate()

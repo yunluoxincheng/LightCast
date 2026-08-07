@@ -25,6 +25,8 @@ class MpvWidget(QWidget):
 
     # 鼠标在渲染区活动（移动/点击/双击）——用于唤起控制栏
     mouseActivity = Signal()
+    # 双击渲染区——用于切换全屏
+    mouseDoubleClicked = Signal()
 
     def __init__(self, player: Player, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -69,4 +71,5 @@ class MpvWidget(QWidget):
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802, ANN001
         self.mouseActivity.emit()
+        self.mouseDoubleClicked.emit()
         super().mouseDoubleClickEvent(event)

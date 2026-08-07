@@ -53,11 +53,13 @@ class ControlBar(QWidget):
     # 用户在控制栏上的活动（用于重置自动隐藏计时）
     activity = Signal()
 
-    def __init__(self, player: Player) -> None:
-        super().__init__(
-            None,
-            Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint,
-        )
+    def __init__(self, player: Player, parent: QWidget | None = None) -> None:
+        # 嵌入模式：控制栏归属主窗口（parent），不置顶——
+        # - Qt.Tool + parent：随主窗口最小化/隐藏，且不会覆盖其它应用
+        # - 不加 WindowStaysOnTopHint（那是独立窗口时代为避免被主窗口盖住加的，
+        #   嵌入后会让控制栏盖过所有应用）
+        # - FramelessWindowHint：无边框
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
         self._player = player
         self._anchor: QWidget | None = None
         self._dragging_slider = False
