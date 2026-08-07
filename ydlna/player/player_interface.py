@@ -33,7 +33,6 @@ from qfluentwidgets import (
     FluentIcon as FIF,
     IconWidget,
     PrimaryPushButton,
-    PushButton,
     StrongBodyLabel,
     SubtitleLabel,
     TitleLabel,
@@ -121,10 +120,7 @@ class PlayerInterface(QWidget):
         btn_row.setSpacing(10)
         self.showWindowButton = PrimaryPushButton(FIF.LINK, tr("player.show_window"))
         self.showWindowButton.setEnabled(False)
-        self.fullscreenButton = PushButton(FIF.FULL_SCREEN, tr("player.fullscreen"))
-        self.fullscreenButton.setEnabled(False)
         btn_row.addWidget(self.showWindowButton)
-        btn_row.addWidget(self.fullscreenButton)
         btn_row.addStretch(1)
         root.addLayout(btn_row)
 
@@ -145,7 +141,6 @@ class PlayerInterface(QWidget):
         s.errorOccurred.connect(self._on_error)
 
         self.showWindowButton.clicked.connect(lambda: self.togglePlayerWindowRequested.emit(True))
-        # fullscreenButton 的 clicked 由 app.py 直接连到 PlayerWindow.toggle_fullscreen
 
     # ------------------------------------------------------------------ #
     # 槽
@@ -155,7 +150,6 @@ class PlayerInterface(QWidget):
         self.titleLabel.setText(display)
         self.statusLabel.setText(url)
         self.showWindowButton.setEnabled(True)
-        self.fullscreenButton.setEnabled(True)
         self.tipTitle.setText(display)
         self.tipHint.setText(url)
 
@@ -176,7 +170,6 @@ class PlayerInterface(QWidget):
     # ------------------------------------------------------------------ #
     def _retranslate(self, *_args) -> None:
         self.showWindowButton.setText(tr("player.show_window"))
-        self.fullscreenButton.setText(tr("player.fullscreen"))
         if self._player.get_state() == "idle" and self._player.get_duration() is None:
             self.titleLabel.setText(tr("player.empty"))
             self.tipTitle.setText(tr("player.empty"))

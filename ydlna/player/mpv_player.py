@@ -101,6 +101,7 @@ class Player:
         self._state: str = "idle"
         self._volume: int = 80
         self._muted: bool = False
+        self._speed: float = 1.0
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -124,12 +125,13 @@ class Player:
             terminal=False,
         )
         self._register_callbacks()
-        # 应用初始音量
+        # 应用初始音量/倍速
         try:
             self._mpv.volume = self._volume
             self._mpv.mute = self._muted
+            self._mpv.speed = self._speed
         except Exception as e:  # 属性写入偶尔会因时机失败，忽略
-            log.debug("设置初始音量失败: %s", e)
+            log.debug("设置初始属性失败: %s", e)
         self._attached = True
         self._set_state("idle")
 
@@ -258,6 +260,26 @@ class Player:
         except Exception as e:
             log.warning("seek 失败: %s", e)
 
+    def seek_relative(self, delta: float) -> None:
+        """相对快进/后退 delta 秒（用于「快进 ±10s」按钮）。"""
+        if not self.available:
+            return
+        try:
+            self._mpv.command("seek", float(delta), "relative", "exact")
+        except Exception as e:
+            log.warning("relative seek 失败: %s", e)
+
+    def set_speed(self, speed: float) -> None:
+        """设置播放倍速（0.25 ~ 4.0）。"""
+        speed = max(0.25, min(4.0, float(speed)))
+        if not self.available:
+            self._speed = speed
+            return
+        try:
+            self._mpv.speed = speed
+        except Exception as e:
+            log.debug("设置倍速失败: %s", e)
+
     def set_volume(self, volume: int) -> None:
         volume = max(0, min(100, int(volume)))
         if not self.available:
@@ -297,6 +319,9 @@ class Player:
 
     def get_volume(self) -> int:
         return self._volume
+
+    def get_speed(self) -> float:
+        return self._speed
 
     def is_muted(self) -> bool:
         return self._muted

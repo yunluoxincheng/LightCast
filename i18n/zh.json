@@ -34,6 +34,13 @@
   "player.volume": "音量",
   "player.fullscreen": "全屏",
   "player.exit_fullscreen": "退出全屏",
+  "player.prev": "上一集",
+  "player.next": "下一集",
+  "player.forward": "快进 10 秒",
+  "player.backward": "后退 10 秒",
+  "player.speed": "倍速",
+  "player.speed.normal": "正常",
+  "player.no_playlist": "无播放列表（单媒体）",
 
   "settings.title": "设置",
   "settings.group.general": "通用",

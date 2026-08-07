@@ -34,6 +34,13 @@
   "player.volume": "Volume",
   "player.fullscreen": "Fullscreen",
   "player.exit_fullscreen": "Exit fullscreen",
+  "player.prev": "Previous",
+  "player.next": "Next",
+  "player.forward": "Forward 10s",
+  "player.backward": "Backward 10s",
+  "player.speed": "Speed",
+  "player.speed.normal": "Normal",
+  "player.no_playlist": "No playlist (single media)",
 
   "settings.title": "Settings",
   "settings.group.general": "General",

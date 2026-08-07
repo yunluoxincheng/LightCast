@@ -139,26 +139,26 @@ async def run() -> int:
     window.playerInterface.togglePlayerWindowRequested.connect(
         lambda show: (player_window.showNormal(), player_window.raise_()) if show else player_window.hide()
     )
-    window.playerInterface.fullscreenButton.clicked.connect(player_window.toggle_fullscreen)
 
     # 显示窗口 + 托盘
     window.show()
     tray.show()
 
     # 关键：先把独立播放窗口 show 出来拿到 HWND，再 attach mpv。
-    # 独立窗口脱离主窗口 widget 树，mpv 原生窗口不会与 MSFluentWindow 的导航栈
-    # 产生 z-order 冲突。attach 后立即隐藏窗口（投屏到达时再 show）。
+    # 注意：attach 后保持窗口可见（不 hide）——Windows 上原生 HWND 被 hide 后
+    # mpv 的 GPU 渲染会挂起，导致投屏后画面不出来。attach 完成后用户可手动
+    # 关闭窗口（仅隐藏），下次投屏到达会重新 show。
     from PySide6.QtCore import QTimer
 
     def _ensure_mpv_ready():
         # 先 show 拿到 HWND（必须真正显示过 winId 才有效）
         player_window.show()
         player_window.raise_()
+        player_window.activateWindow()
         ok = player_window.attach_mpv()
         if ok:
             log.info("mpv 已就绪（投屏可立即播放）")
-            # attach 成功后隐藏，等投屏到达再显示
-            player_window.hide()
+            # 不再立即 hide：保持可见，等用户关闭或投屏到达
         else:
             # HWND 尚未就绪，再等一拍重试
             QTimer.singleShot(300, _ensure_mpv_ready)
