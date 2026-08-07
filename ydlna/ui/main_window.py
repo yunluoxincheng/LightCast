@@ -107,6 +107,8 @@ class MainWindow(MSFluentWindow):
                 self.titleBar.show()
             # 恢复播放器页 header（标题栏）
             self.playerInterface.header.show()
+            # 恢复 48px 顶部边距（MSFluentWindow 给悬浮标题栏留的位置）
+            self.hBoxLayout.setContentsMargins(0, 48, 0, 0)
             self.playerInterface.on_fullscreen_changed(False)
         else:
             # 先切到播放器页
@@ -116,6 +118,9 @@ class MainWindow(MSFluentWindow):
                 self.titleBar.hide()
             # 隐藏播放器页 header（避免全屏时露出标题/按钮）
             self.playerInterface.header.hide()
+            # 标题栏是浮层（不在布局里），布局靠固定 48px 上边距让位；
+            # 全屏隐藏标题栏后必须清掉这个边距，否则顶部残留 48px 空条
+            self.hBoxLayout.setContentsMargins(0, 0, 0, 0)
             self.showFullScreen()
             self.playerInterface.on_fullscreen_changed(True)
         self.playerInterface._position_overlays()
