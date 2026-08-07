@@ -1,4 +1,4 @@
-# YDLNA —— DLNA 投屏接收软件
+# 轻投（LightCast）—— DLNA 投屏接收软件
 
 把你的电脑变成一个 DLNA MediaRenderer（投屏接收端）。从手机（或任意 DLNA 控制点）把视频、音乐、图片投到电脑上，用内置的现代化播放器播放。
 
@@ -19,7 +19,7 @@
 - **Python 3.10 ~ 3.12**（在 3.11.9 上开发测试）
 - **libmpv**（`libmpv-2.dll`，见下文获取方式）
 
-> 当前未提供打包好的 exe，需要 Python 环境运行。打包脚本（PyInstaller）可作为后续工作。
+> 也可以直接下载打包好的安装包（见下文「十一、打包」）。
 
 ---
 
@@ -35,7 +35,7 @@ pip install -r requirements.txt
 
 ### 2. 获取 libmpv（关键，播放器依赖它）
 
-YDLNA 通过 `python-mpv` 调用 libmpv 渲染视频，**必须手动下载 `libmpv-2.dll` 放到 `bin/` 目录**（dll 体积大，不纳入仓库）。
+轻投（LightCast）通过 `python-mpv` 调用 libmpv 渲染视频，**必须手动下载 `libmpv-2.dll` 放到 `bin/` 目录**（dll 体积大，不纳入仓库）。
 
 **步骤：**
 
@@ -46,7 +46,7 @@ YDLNA 通过 `python-mpv` 调用 libmpv 渲染视频，**必须手动下载 `lib
 4. 把它放到项目的 **`bin/libmpv-2.dll`**：
 
 ```
-YDLNA/
+LightCast/
 ├── bin/
 │   └── libmpv-2.dll   ← 放这里
 ├── main.py
@@ -56,7 +56,7 @@ YDLNA/
 
 > 文件名必须是 `libmpv-2.dll`、`mpv-2.dll` 或 `mpv-1.dll` 之一（`python-mpv` 的搜索约定）。
 >
-> 首次启动时若检测不到 dll，YDLNA 会弹窗提示。
+> 首次启动时若检测不到 dll，轻投会弹窗提示。
 
 ---
 
@@ -82,11 +82,11 @@ python main.py
    - **通用**：[BubbleUPnP](https://play.google.com/store/apps/details?id=com.bubblesoft.android.bubbleupnp)（推荐，Android）
    - **视频**：VLC、MX Player、系统相册/文件的「投射」
    - **iOS**：建议用第三方 DLNA 应用（系统 AirPlay 不兼容 DLNA）
-3. 在应用的设备列表里，选择名为 **`YDLNA Renderer`**（或你在设置里改的名字）的设备。
+3. 在应用的设备列表里，选择名为 **`轻投`**（或你在设置里改的名字）的设备。
 4. 选择要播放的视频/音乐/图片，电脑会自动开始播放。
-5. 在 YDLNA 窗口的「播放器」页可以：拖动进度条定位、播放/暂停、停止、调音量。
+5. 在轻投窗口的「播放器」页可以：拖动进度条定位、播放/暂停、停止、调音量。
 
-手机端会实时显示播放进度（YDLNA 每秒回传进度）。
+手机端会实时显示播放进度（轻投每秒回传进度）。
 
 ---
 
@@ -102,14 +102,14 @@ python main.py
 | 设备名称 | 手机投屏列表里显示的名字 | **是** |
 | 服务端口 | HTTP 端口，`0` = 自动分配，一般无需改 | **是** |
 
-需要重启的设置改完后，关闭并重新打开 YDLNA 即可。
+需要重启的设置改完后，关闭并重新打开轻投 即可。
 
 ---
 
 ## 六、项目结构
 
 ```
-YDLNA/
+LightCast/
 ├── main.py                     # 入口（注意导入顺序：PySide6 → qasync → ydlna.player）
 ├── requirements.txt
 ├── bin/libmpv-2.dll            # libmpv（用户自行放入，不纳入仓库）
@@ -200,15 +200,15 @@ from ydlna.player.mpv_player import ...      # 3. 最后加载 libmpv
 2. 确认主页显示的本机 IP 是局域网地址（如 `192.168.x.x`），不是 `127.0.0.1`。
 3. **Windows 防火墙**：首次启动会询问是否允许 Python 联网，选「允许」。若误点了拒绝，去「Windows Defender 防火墙 → 允许应用通过防火墙」找到 Python 勾选「专用」网络。
 4. 路由器开启了「AP 隔离 / 客户端隔离」会阻断设备发现，需关闭。
-5. 查看 `ydlna.log` 是否有「DLNA 服务已启动」。
+5. 查看 `lightcast.log` 是否有「DLNA 服务已启动」。
 
 ### 投屏后电脑不播放
-1. 查看 `ydlna.log` 里是否有 `SetAVTransportURI` / `桥接: 设置媒体` / `媒体已装载` 日志。
+1. 查看 `lightcast.log` 里是否有 `SetAVTransportURI` / `桥接: 设置媒体` / `媒体已装载` 日志。
 2. 确认 `bin/libmpv-2.dll` 存在。
 3. 部分控制点推送的流可能需要转码；试试不同格式的视频。
 
 ### 进度不刷新
-YDLNA 每秒回传进度。若手机端进度条不动，查看日志是否有「更新 RelTime」相关。某些控制点不订阅 GENA 事件则看不到实时进度（但点查询按钮仍能看到）。
+轻投每秒回传进度。若手机端进度条不动，查看日志是否有「更新 RelTime」相关。某些控制点不订阅 GENA 事件则看不到实时进度（但点查询按钮仍能看到）。
 
 ---
 
@@ -225,3 +225,35 @@ YDLNA 每秒回传进度。若手机端进度条不动，查看日志是否有�
 - [jaseg/python-mpv](https://github.com/jaseg/python-mpv) —— libmpv 的 Python 绑定
 - [zhiyiYo/PyQt-Fluent-Widgets](https://github.com/zhiyiYo/PyQt-Fluent-Widgets) —— Fluent Design 组件库
 - [mpv](https://mpv.io/) —— 媒体播放器
+
+---
+
+## 十一、打包
+
+### 1. 构建 exe（PyInstaller）
+
+```bash
+pip install pyinstaller
+pyinstaller LightCast.spec --noconfirm
+```
+
+产物：`dist/LightCast/LightCast.exe`（onedir 模式，含 `_internal/` 全部依赖，约 400MB）。
+
+要点：
+- `bin/libmpv-2.dll` 会随包打入 `_internal/bin/`，运行时自动注入 PATH 供 python-mpv 加载
+- 安装版把配置/日志写入 `%APPDATA%\LightCast`，不污染安装目录
+- spec 里排除了环境中的 PyQt5/PyQt6（与 PySide6 冲突）和整套 ML 栈
+  （numpy/scipy 是 qfluentwidgets 的运行时依赖，会保留；torch/transformers 等
+  由 scipy 条件导入带入，与本应用无关，全部排除）
+
+### 2. 制作安装程序（Inno Setup 6）
+
+1. 安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+2. 先执行第 1 步构建 exe
+3. 用 ISCC 编译脚本：
+
+```bash
+ISCC.exe packaging\installer.iss
+```
+
+产物：`dist/LightCast-Setup-0.1.0.exe`（安装向导：开始菜单/桌面快捷方式、卸载程序、中文/英文双语界面）。

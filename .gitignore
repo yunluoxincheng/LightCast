@@ -17,6 +17,8 @@ bin/mpv-1.dll
 config.json
 ydlna.log
 ydlna.log.*
+lightcast.log
+lightcast.log.*
 
 # IDE / 编辑器
 .vscode/

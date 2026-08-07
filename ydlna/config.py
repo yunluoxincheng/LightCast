@@ -20,7 +20,7 @@ log = get_logger("config")
 DEFAULTS: dict[str, Any] = {
     # DLNA 设备标识。UDN 必须持久化，否则控制点会把它当成新设备
     "udn": f"uuid:{uuid.uuid4()}",
-    "friendly_name": "YDLNA Renderer",
+    "friendly_name": "轻投",
     "dlna_enabled": True,
     "http_port": 0,  # 0 = 自动分配
     # UI
@@ -82,6 +82,8 @@ class Config(QObject):
 
     def save(self) -> None:
         try:
+            # 首次保存时目录可能不存在（如打包后 %APPDATA%\LightCast）
+            self._path.parent.mkdir(parents=True, exist_ok=True)
             with self._path.open("w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
         except OSError as e:

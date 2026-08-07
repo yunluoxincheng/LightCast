@@ -193,7 +193,7 @@ class HomeInterface(QWidget):
         self.startButton.setText(tr("home.start_service"))
         self.stopButton.setText(tr("home.stop_service"))
         self.tipTitle.setText(tr("home.tip.title"))
-        name = self.deviceCard.valueLabel.text() or "YDLNA"
+        name = self.deviceCard.valueLabel.text() or "轻投"
         self.tipBody.setText(tr("home.tip.body", name=name))
         running = self.statusDot.status == "running"
         self.statusText.setText(tr("home.status.running" if running else "home.status.stopped"))

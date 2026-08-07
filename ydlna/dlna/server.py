@@ -102,7 +102,7 @@ class DlnaServer:
         # 让 UpnpServer 只跑 HTTP，SSDP 由我们的线程接管
         _patch_upnp_server_skip_ssdp()
 
-        friendly_name = self._config.get("friendly_name", "YDLNA Renderer")
+        friendly_name = self._config.get("friendly_name", "轻投")
         udn = self._config.get("udn")
         http_port = int(self._config.get("http_port", 0))
 

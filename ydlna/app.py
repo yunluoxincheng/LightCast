@@ -120,7 +120,7 @@ async def run() -> int:
         window.homeInterface.set_service_running(server.running)
         if server.running:
             window.refresh_device_info(
-                config.get("friendly_name", "YDLNA Renderer"),
+                config.get("friendly_name", "轻投"),
                 get_local_ip(),
             )
 
@@ -162,7 +162,7 @@ async def run() -> int:
 
     # 初始设备信息
     window.refresh_device_info(
-        config.get("friendly_name", "YDLNA Renderer"),
+        config.get("friendly_name", "轻投"),
         get_local_ip(),
     )
 

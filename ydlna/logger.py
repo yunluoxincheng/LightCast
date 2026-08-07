@@ -24,7 +24,7 @@ _THIRD_PARTY_LOGGERS = (
 def setup_logging(level: int = logging.INFO) -> logging.Logger:
     """配置全局日志，返回应用 logger。多次调用安全。
 
-    level 只作用于 YDLNA 自身和通用第三方；SSDP/UPnP 流量日志单独设为 DEBUG，
+    level 只作用于 轻投自身和通用第三方；SSDP/UPnP 流量日志单独设为 DEBUG，
     这样即使主日志是 INFO，也能看到设备发现的收发包细节（诊断投屏必备）。
     """
     global _CONFIGURED
@@ -47,6 +47,8 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
 
     # 文件（轮转，单文件 1MB，保留 3 份）
     try:
+        # 打包后日志目录（%APPDATA%\LightCast）首次运行可能不存在
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         file_handler = RotatingFileHandler(
             LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
         )

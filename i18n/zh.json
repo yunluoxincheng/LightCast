@@ -1,5 +1,5 @@
 {
-  "app.name": "YDLNA 投屏接收器",
+  "app.name": "轻投 投屏接收器",
   "app.tagline": "让你的电脑接收手机投屏",
 
   "nav.home": "主页",
@@ -23,7 +23,7 @@
   "player.empty": "等待投屏中…",
   "player.empty.hint": "从手机选择投屏目标后，媒体将在播放窗口中播放。",
   "player.unknown_title": "未知媒体",
-  "player.window_title": "YDLNA 播放器",
+  "player.window_title": "轻投 播放器",
   "player.show_window": "显示播放窗口",
   "player.hide_window": "隐藏播放窗口",
   "player.play": "播放",
@@ -63,24 +63,24 @@
 
   "settings.group.about": "关于",
   "settings.about.version": "版本",
-  "settings.about.description": "YDLNA 是一个开源的 DLNA 投屏接收软件，使用 PySide6 + libmpv 构建。",
+  "settings.about.description": "轻投 是一个开源的 DLNA 投屏接收软件，使用 PySide6 + libmpv 构建。",
   "settings.about.license": "许可证：GPLv3",
   "settings.about.github": "项目主页",
 
-  "tray.tooltip.idle": "YDLNA 投屏接收器",
-  "tray.tooltip.playing": "YDLNA · 正在播放：{title}",
+  "tray.tooltip.idle": "轻投 投屏接收器",
+  "tray.tooltip.playing": "轻投 · 正在播放：{title}",
   "tray.show": "显示主窗口",
   "tray.play_pause": "播放 / 暂停",
   "tray.stop": "停止",
   "tray.quit": "退出",
 
   "dialog.minimize_to_tray.title": "最小化到系统托盘",
-  "dialog.minimize_to_tray.body": "YDLNA 将继续在后台运行以接收投屏。点击托盘图标可重新打开窗口。",
+  "dialog.minimize_to_tray.body": "轻投 将继续在后台运行以接收投屏。点击托盘图标可重新打开窗口。",
   "dialog.dll_missing.title": "缺少 libmpv",
   "dialog.dll_missing.body": "未找到 mpv-2.dll，播放器无法工作。请阅读 README.md，将 libmpv 的 mpv-2.dll 放入 bin/ 目录后重启。",
   "dialog.dll_missing.detail": "下载地址：https://sourceforge.net/projects/mpv-player-windows/files/libmpv/",
   "dialog.restart.title": "需要重启",
-  "dialog.restart.body": "该设置将在重启 YDLNA 后生效。是否立即重启？",
+  "dialog.restart.body": "该设置将在重启轻投后生效。是否立即重启？",
 
   "common.ok": "确定",
   "common.cancel": "取消",

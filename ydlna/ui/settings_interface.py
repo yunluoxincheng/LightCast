@@ -180,7 +180,7 @@ class SettingsInterface(QWidget):
         self._config.set("dlna_enabled", checked)
 
     def _on_device_name_changed(self, text: str) -> None:
-        self._config.set("friendly_name", text.strip() or "YDLNA Renderer")
+        self._config.set("friendly_name", text.strip() or "轻投")
 
     def _on_port_changed(self, text: str) -> None:
         try:

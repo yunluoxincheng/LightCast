@@ -1,4 +1,4 @@
-# YDLNA 核心依赖
+# 轻投（LightCast）核心依赖
 PySide6>=6.6,<6.12
 PySide6-Fluent-Widgets>=1.5
 qasync>=0.27

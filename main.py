@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""YDLNA 入口。
+"""轻投（LightCast）入口。
 
 导入顺序非常重要（Windows）：
 1. 先完全加载 PySide6（Qt6 的 dll 必须先就位）

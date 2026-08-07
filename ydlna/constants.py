@@ -1,13 +1,14 @@
-"""YDLNA 全局常量定义。"""
+"""轻投（LightCast）全局常量定义。"""
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
 # 路径
 # --------------------------------------------------------------------------- #
-# 项目根目录（ydlna/ 的上一级）
+# 项目根目录（ydlna/ 的上一级；打包后为 PyInstaller 的 _internal 目录）
 APP_DIR: Path = Path(__file__).resolve().parent.parent
 # 存放 libmpv (mpv-2.dll) 等二进制
 BIN_DIR: Path = APP_DIR / "bin"
@@ -15,10 +16,6 @@ BIN_DIR: Path = APP_DIR / "bin"
 ASSETS_DIR: Path = APP_DIR / "assets"
 # 国际化文案目录
 I18N_DIR: Path = APP_DIR / "i18n"
-# 配置文件
-CONFIG_PATH: Path = APP_DIR / "config.json"
-# 日志文件
-LOG_PATH: Path = APP_DIR / "ydlna.log"
 
 
 def ensure_bin_in_path() -> None:
@@ -45,9 +42,18 @@ def ensure_bin_in_path() -> None:
 # --------------------------------------------------------------------------- #
 # 应用元信息
 # --------------------------------------------------------------------------- #
-APP_NAME: str = "YDLNA"
+APP_NAME: str = "LightCast"
 APP_VERSION: str = "0.1.0"
-APP_DISPLAY_NAME: str = "YDLNA 投屏接收器"
+APP_DISPLAY_NAME: str = "轻投"
+
+# 配置文件/日志：开发模式放项目目录；打包（frozen）后放 %APPDATA%\LightCast，
+# 避免写入程序安装目录（可能无写权限、升级时被覆盖清空）
+if getattr(sys, "frozen", False):
+    _DATA_DIR: Path = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
+else:
+    _DATA_DIR = APP_DIR
+CONFIG_PATH: Path = _DATA_DIR / "config.json"
+LOG_PATH: Path = _DATA_DIR / "lightcast.log"
 
 # UPnP / DLNA 协议常量
 DEVICE_TYPE_MEDIA_RENDERER: str = ":urn:schemas-upnp-org:device:MediaRenderer:1"
