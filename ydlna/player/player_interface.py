@@ -113,6 +113,14 @@ class PlayerInterface(QWidget):
         self._hide_timer.timeout.connect(self._hide_controls)
         self._hide_timer.start()
 
+        # 持续锚定定时器：事件驱动定位有盲区（窗口移动、页面切换时的瞬态
+        # 布局都不会触发重新定位，控制栏会停留在旧位置甚至窗口外），
+        # 这里周期刷新，保证控制栏始终贴住页面底部
+        self._anchor_timer = QTimer(self)
+        self._anchor_timer.setInterval(150)
+        self._anchor_timer.timeout.connect(self._reanchor)
+        self._anchor_timer.start()
+
     def _build_empty(self, parent) -> QWidget:  # noqa: ANN001
         w = QWidget(parent)
         w.setStyleSheet("background: #141414;")
@@ -155,6 +163,11 @@ class PlayerInterface(QWidget):
         self.controlBar.hide()
 
     def _on_page_shown(self) -> None:
+        # 页面隐藏时直接返回：showEvent 的延迟回调可能在切回其它页后才执行
+        # （启动时 _ensure_mpv_ready 先切播放器页再切回主页），此时不能
+        # show 渲染区/控制栏，否则会残留到主页上
+        if not self.isVisible():
+            return
         self.mpvWidget.show()
         self.mpvWidget.attach_player()
         # 有媒体时显示播放画面，否则显示空状态
@@ -185,7 +198,17 @@ class PlayerInterface(QWidget):
     # ------------------------------------------------------------------ #
     # 控制栏显示/隐藏
     # ------------------------------------------------------------------ #
+    def _has_media(self) -> bool:
+        """是否已有可播放的媒体（成功投屏后才有）。"""
+        return (
+            self._player.get_duration() is not None
+            or self._player.get_state() in ("playing", "paused")
+        )
+
     def _show_controls(self) -> None:
+        # 页面不可见（切到其它页的残留调用）或无媒体（尚未投屏）时不显示
+        if not self.isVisible() or not self._has_media():
+            return
         if not self.controlBar.isVisible():
             self.controlBar.show()
             self.controlBar.update_position()
@@ -197,6 +220,11 @@ class PlayerInterface(QWidget):
         # 仅全屏时自动隐藏
         if self._is_fullscreen() and self._player.get_state() == "playing":
             self.controlBar.hide()
+
+    def _reanchor(self) -> None:
+        """周期跟随：页面可见且控制栏可见时刷新其位置。"""
+        if self.isVisible() and self.controlBar.isVisible():
+            self.controlBar.update_position()
 
     def _is_fullscreen(self) -> bool:
         win = self.window()
@@ -275,9 +303,13 @@ class PlayerInterface(QWidget):
         self.stateChanged.emit(state)
         if state == "playing":
             self._hide_empty()
+            # 投屏开始播放 → 控制栏出现（媒体门控在 _show_controls 内）
+            self._show_controls()
             self._hide_timer.start()
         elif state == "idle" and self._player.get_duration() is None:
             self._show_empty()
+            # 没有媒体了 → 控制栏也隐藏
+            self.controlBar.hide()
 
     def _on_error(self, msg: str) -> None:
         self.titleLabel.setText(msg)
