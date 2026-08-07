@@ -96,6 +96,18 @@ async def run() -> int:
     signals = _AppSignals()
 
     # ---- 连接 ----
+    # 投屏到达（SetAVTransportURI）→ 立即进播放器页 + 缓冲动画，不等解码。
+    # 后续 mediaChanged（解码完成）会再触发一次 on_cast 保证窗口置顶/控制栏
+    def on_cast_started() -> None:
+        log.info("投屏到达，立即进入播放器页并开始缓冲")
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        window.switch_to_player()
+        window.playerInterface.show_buffering(override=True)
+
+    bridge.on_cast_started = on_cast_started
+
     # DLNA 投屏到达 → 切到播放器页（内嵌渲染区）
     def on_cast(title: str, url: str) -> None:
         log.info("投屏到达: %s", url)

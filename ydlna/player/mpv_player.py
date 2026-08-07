@@ -73,6 +73,8 @@ class PlayerSignals(QObject):
     errorOccurred = Signal(str)
     # 播放/加载失败：(标题, 技术细节)。用于 UI 友好提示
     playbackFailed = Signal(str, str)
+    # 网络缓冲状态变化（paused-for-cache）：True=正在缓冲
+    bufferingChanged = Signal(bool)
 
 
 class Player:
@@ -109,6 +111,9 @@ class Player:
         self._load_ok: bool = False
         # 最近一次播放的关键错误细节（播放失败时随 playbackFailed 上报）
         self._last_error: str = ""
+        # 装载中（play() 到 file-loaded 之间）与网络缓冲中（paused-for-cache）
+        self._loading: bool = False
+        self._buffering: bool = False
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -219,6 +224,12 @@ class Player:
             elif self._state != "idle":
                 self._set_state("playing")
 
+        @m.property_observer("paused-for-cache")
+        def _on_cache(_name, value):  # noqa: ANN001
+            """网络缓冲中（等待缓存）→ 通知 UI 显示缓冲动画。"""
+            self._buffering = bool(value)
+            self.signals.bufferingChanged.emit(self._buffering)
+
         @m.property_observer("volume")
         def _on_volume(_name, value):  # noqa: ANN001
             if value is not None:
@@ -239,6 +250,7 @@ class Player:
         def _on_file_loaded(_event):  # noqa: ANN001
             log.info("媒体已装载: %s", self._url)
             self._load_ok = True
+            self._loading = False
             self._set_state("playing")
             self.signals.mediaChanged.emit(self._title or self._url, self._url)
 
@@ -254,6 +266,7 @@ class Player:
                     pass
             log.info("媒体结束 (reason=%s)", reason)
             self._position = None
+            self._loading = False
             self._set_state("idle")
             # mpv end-file reason: 0=EOF 2=STOP 3=QUIT 4=ERROR 5=REDIRECT
             # 播放失败（ERROR，或从未装载成功就结束）→ 上报友好提示
@@ -279,6 +292,7 @@ class Player:
         self._title = title
         self._load_ok = False
         self._last_error = ""
+        self._loading = True
         log.info("播放: title=%r url=%s", title, url)
         self._mpv.play(url)
 
@@ -402,6 +416,14 @@ class Player:
 
     def get_state(self) -> str:
         return self._state
+
+    def get_loading(self) -> bool:
+        """是否正在装载媒体（play() 之后、file-loaded 之前）。"""
+        return self._loading
+
+    def get_buffering(self) -> bool:
+        """是否正在网络缓冲（paused-for-cache）。"""
+        return self._buffering
 
     def get_title(self) -> str:
         return self._title

@@ -19,6 +19,7 @@
   "home.stop_service": "停止投屏服务",
   "player.empty": "等待投屏中…",
   "player.empty.hint": "从手机选择投屏目标后，媒体将在播放窗口中播放。",
+  "player.buffering": "正在缓冲…",
   "player.unknown_title": "未知媒体",
   "player.window_title": "轻投 播放器",
   "player.show_window": "显示播放窗口",

@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
@@ -47,6 +47,64 @@ if TYPE_CHECKING:
     pass
 
 log = get_logger("ui.player")
+
+
+class _Spinner(QWidget):
+    """旋转缓冲指示器：QPainter 画一段圆弧，定时器驱动旋转。"""
+
+    _STEP = 12  # 每帧旋转角度（30ms 一帧 → 1 圈 0.9s）
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(36, 36)
+        self._angle = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(30)
+        self._timer.timeout.connect(self._advance)
+        self._timer.start()
+
+    def _advance(self) -> None:
+        self._angle = (self._angle + self._STEP) % 360
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ANN001
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#0078d4"), 3)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        # 270° 圆弧随角度旋转（加载转圈效果）
+        p.drawArc(self.rect().adjusted(5, 5, -5, -5), -self._angle * 16, 270 * 16)
+        p.end()
+
+
+class BufferingOverlay(QWidget):
+    """缓冲提示卡片：spinner + 「正在缓冲…」，悬浮在渲染区中央。
+
+    投屏到达立即显示（解码在后台进行），解码完成或失败后隐藏。
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(200, 110)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(
+            "BufferingOverlay { background: rgba(18, 18, 18, 0.88);"
+            " border: 1px solid #2a2a2a; border-radius: 12px; }"
+            "BufferingOverlay QLabel { background: transparent; color: #e0e0e0; }"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
+        self.spinner = _Spinner(self)
+        self.label = BodyLabel("", self)
+        self.label.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.spinner, 0, Qt.AlignCenter)
+        lay.addWidget(self.label)
+        self.hide()
+
+    def set_text(self, text: str) -> None:
+        self.label.setText(text)
 
 # 播放失败技术细节 → 友好原因映射（按关键词，顺序敏感：403 优先于通用网络）
 _HINT_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -117,6 +175,14 @@ class PlayerInterface(QWidget):
         self.emptyWidget.setGeometry(0, 0, 1, 1)  # 初始小几何，由 resizeEvent 校正
         self.emptyWidget.hide()
 
+        # 缓冲动画浮层（投屏到达立即显示，解码完成/失败后隐藏）
+        self.bufferOverlay = BufferingOverlay(self)
+        self.bufferOverlay.setGeometry(0, 0, 1, 1)
+        self.bufferOverlay.hide()
+        # 投屏待缓冲标志：从「投屏到达」到「解码完成」期间强制保持浮层，
+        # 挡住 paused-for-cache 观察器注册时的初始 False 异步回调（时序不定）
+        self._buffering_override = False
+
         # 独立浮层控制栏（悬浮，不占布局；归属主窗口，不置顶）
         # 关键：parent 必须在构造时传入——Qt.Tool | FramelessWindowHint 在构造时
         # 指定才保持"顶层工具窗口"身份；若先建后 setParent()，setParent 会剥离
@@ -171,6 +237,7 @@ class PlayerInterface(QWidget):
         s.mediaChanged.connect(self._on_media_changed)
         s.stateChanged.connect(self._on_state_changed)
         s.playbackFailed.connect(self._on_playback_failed)
+        s.bufferingChanged.connect(self._on_buffering_changed)
 
     # ------------------------------------------------------------------ #
     # 页面切换（关键：原生窗口的 hide/show 管理）
@@ -194,8 +261,11 @@ class PlayerInterface(QWidget):
             return
         self.mpvWidget.show()
         self.mpvWidget.attach_player()
-        # 有媒体时显示播放画面，否则显示空状态
-        if self._player.get_duration() is None:
+        # 有媒体时显示播放画面，否则显示空状态；装载/网络缓冲中显示缓冲动画
+        if self._player.get_loading() or self._player.get_buffering():
+            self._hide_empty()
+            self.show_buffering()
+        elif self._player.get_duration() is None:
             self._show_empty()
         else:
             self._hide_empty()
@@ -217,6 +287,13 @@ class PlayerInterface(QWidget):
         # 空状态覆盖层 = 渲染区几何（含 header 下方）
         r = self.mpvWidget.geometry()
         self.emptyWidget.setGeometry(r)
+        # 缓冲动画卡片居中悬浮在渲染区中央
+        w, h = self.bufferOverlay.width(), self.bufferOverlay.height()
+        self.bufferOverlay.setGeometry(
+            r.x() + (r.width() - w) // 2,
+            r.y() + (r.height() - h) // 2,
+            w, h,
+        )
         self.controlBar.update_position()
 
     # ------------------------------------------------------------------ #
@@ -276,6 +353,35 @@ class PlayerInterface(QWidget):
         self.emptyWidget.hide()
 
     # ------------------------------------------------------------------ #
+    # 缓冲动画（投屏到达 / mpv 装载中 / 网络缓冲中显示）
+    # ------------------------------------------------------------------ #
+    def show_buffering(self, *, override: bool = False) -> None:
+        """显示缓冲动画（投屏到达后立即调用，不等解码）。
+
+        override=True：投屏待缓冲，强制保持浮层直到解码完成/失败
+        （挡住 paused-for-cache 初始 False 的异步回调时序问题）。
+        """
+        if override:
+            self._buffering_override = True
+        self._hide_empty()
+        if not self.bufferOverlay.isVisible():
+            self.bufferOverlay.show()
+            self.bufferOverlay.raise_()
+            self._position_overlays()
+
+    def hide_buffering(self) -> None:
+        self._buffering_override = False
+        if self.bufferOverlay.isVisible():
+            self.bufferOverlay.hide()
+
+    def _on_buffering_changed(self, buffering: bool) -> None:
+        if buffering:
+            self.show_buffering()
+        elif not self._player.get_loading() and not self._buffering_override:
+            # 装载中或投屏待缓冲时不隐藏，避免缓冲动画闪没
+            self.hide_buffering()
+
+    # ------------------------------------------------------------------ #
     # 全屏请求（由 MainWindow/app 处理：主窗口全屏 + 隐藏导航）
     # ------------------------------------------------------------------ #
     def _on_fullscreen_requested(self) -> None:
@@ -321,17 +427,20 @@ class PlayerInterface(QWidget):
     def _on_media_changed(self, title: str, url: str) -> None:
         self.titleLabel.setText(title or tr("player.unknown_title"))
         self._hide_empty()
+        self.hide_buffering()  # 解码完成，开始播放
         self._show_controls()
 
     def _on_state_changed(self, state: str) -> None:
         self.stateChanged.emit(state)
         if state == "playing":
             self._hide_empty()
+            self.hide_buffering()
             # 投屏开始播放 → 控制栏出现（媒体门控在 _show_controls 内）
             self._show_controls()
             self._hide_timer.start()
         elif state == "idle" and self._player.get_duration() is None:
             self._show_empty()
+            self.hide_buffering()
             # 没有媒体了 → 控制栏也隐藏
             self.controlBar.hide()
 
@@ -343,6 +452,7 @@ class PlayerInterface(QWidget):
         """
         name = title or tr("player.error.play_failed")
         self.titleLabel.setText(name)
+        self.hide_buffering()
         hint = _friendly_hint(detail) or tr("player.error.play_failed.hint")
         content = hint
         if detail:
@@ -365,6 +475,7 @@ class PlayerInterface(QWidget):
         self.emptyTitle.setText(tr("player.empty"))
         self.emptyHint.setText(tr("player.empty.hint"))
         self.titleLabel.setText(tr("player.empty"))
+        self.bufferOverlay.set_text(tr("player.buffering"))
 
     def retranslate_ui(self) -> None:
         self._retranslate()

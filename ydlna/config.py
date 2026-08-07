@@ -33,6 +33,8 @@ DEFAULTS: dict[str, Any] = {
     "audio_device": "",
     # 窗口几何（x, y, w, h），None 表示用系统默认
     "window_geometry": None,
+    # 新版 16:9 默认窗口是否已应用（首次启动时用新默认替换旧的近方形几何）
+    "window_geometry_v2": False,
     # 是否已提示过「关闭即最小化到托盘」
     "minimize_hint_shown": False,
 }

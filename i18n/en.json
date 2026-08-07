@@ -19,6 +19,7 @@
   "home.stop_service": "Stop service",
   "player.empty": "Waiting for cast…",
   "player.empty.hint": "Media will play in the player window once you cast from your phone.",
+  "player.buffering": "Buffering…",
   "player.unknown_title": "Unknown media",
   "player.window_title": "LightCast Player",
   "player.show_window": "Show player window",

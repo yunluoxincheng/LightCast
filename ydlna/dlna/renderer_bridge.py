@@ -126,6 +126,9 @@ class RendererBridge:
         self._poll_task: Optional[asyncio.Task] = None
         self._last_position: Optional[float] = None
         self._last_duration: Optional[float] = None
+        # 投屏到达（SetAVTransportURI）回调：由 app 注入，用于立即切页 + 缓冲动画
+        # （不等代理/解码，用户体感秒进播放器页）
+        self.on_cast_started = None  # Callable[[], None] | None
         # 连接 player 状态变化，同步到 DLNA TransportState
         self._player.signals.stateChanged.connect(self._on_player_state)
 
@@ -156,6 +159,15 @@ class RendererBridge:
         """
         title = parse_title_from_didl(meta) or url
         log.info("桥接: 设置媒体 title=%r url=%s", title, url)
+
+        # 先通知 UI「投屏到达」：立即切到播放器页并显示缓冲动画，
+        # 代理/解码在后台进行（用户体感秒进）
+        cb = self.on_cast_started
+        if cb is not None:
+            try:
+                cb()
+            except Exception as e:  # noqa: BLE001
+                log.debug("on_cast_started 回调异常: %s", e)
 
         if url.lower().startswith(("http://", "https://")):
             proxied = await self._setup_proxy(url)
