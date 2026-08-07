@@ -30,6 +30,8 @@ from qfluentwidgets import (
     CardWidget,
     FluentIcon as FIF,
     IconWidget,
+    InfoBar,
+    InfoBarPosition,
     StrongBodyLabel,
     SubtitleLabel,
     TitleLabel,
@@ -146,7 +148,7 @@ class PlayerInterface(QWidget):
         s = self._player.signals
         s.mediaChanged.connect(self._on_media_changed)
         s.stateChanged.connect(self._on_state_changed)
-        s.errorOccurred.connect(self._on_error)
+        s.playbackFailed.connect(self._on_playback_failed)
 
     # ------------------------------------------------------------------ #
     # 页面切换（关键：原生窗口的 hide/show 管理）
@@ -311,8 +313,23 @@ class PlayerInterface(QWidget):
             # 没有媒体了 → 控制栏也隐藏
             self.controlBar.hide()
 
-    def _on_error(self, msg: str) -> None:
-        self.titleLabel.setText(msg)
+    def _on_playback_failed(self, title: str, detail: str) -> None:
+        """播放/加载失败 → 顶部信息条 + InfoBar 友好提示（技术细节见日志）。"""
+        name = title or tr("player.error.play_failed")
+        self.titleLabel.setText(name)
+        content = tr("player.error.play_failed.hint")
+        if detail:
+            content = f"{content}\n{detail}"
+        InfoBar.error(
+            title=tr("player.error.play_failed"),
+            content=content,
+            orient=Qt.Horizontal,
+            isClosable=True,
+            duration=8000,
+            parent=self,
+            position=InfoBarPosition.TOP,
+        )
+        log.warning("播放失败: %s (%s)", name, detail)
 
     # ------------------------------------------------------------------ #
     # 国际化

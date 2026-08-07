@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QGridLayout, QVBoxLayout, QWidget
 
@@ -26,7 +26,7 @@ from ..i18n import tr, Translator
 from ..logger import get_logger
 
 if TYPE_CHECKING:
-    pass
+    from ..player.mpv_player import Player
 
 log = get_logger("ui.settings")
 
@@ -65,10 +65,11 @@ class SettingsInterface(QWidget):
     # 部分设置需要重启生效
     restartRequested = Signal()
 
-    def __init__(self, config: Config, parent=None) -> None:  # noqa: ANN001
+    def __init__(self, config: Config, player: "Player", parent=None) -> None:  # noqa: ANN001
         super().__init__(parent)
         self.setObjectName("settings-interface")
         self._config = config
+        self._player = player
         self._build_ui()
         self._load_values()
         self._connect()
@@ -94,6 +95,15 @@ class SettingsInterface(QWidget):
         self.themeCombo = ComboBox()
         self.themeCombo.addItems([tr("settings.theme.light"), tr("settings.theme.dark"), tr("settings.theme.auto")])
         self.themeCard.setWidget(self.themeCombo)
+
+        self.bootAutostartCard = _SettingCard(tr("settings.autostart"), tr("settings.autostart.hint"))
+        self.bootAutostartSwitch = SwitchButton()
+        self.bootAutostartCard.setWidget(self.bootAutostartSwitch)
+
+        self.audioDeviceCard = _SettingCard(tr("settings.audio_device"), tr("settings.audio_device.hint"))
+        self.audioDeviceCombo = ComboBox()
+        self.audioDeviceCombo.setMinimumWidth(220)
+        self.audioDeviceCard.setWidget(self.audioDeviceCombo)
 
         # ---- 投屏服务 ----
         self.serviceTitle = SubtitleLabel(tr("settings.group.service"))
@@ -135,6 +145,8 @@ class SettingsInterface(QWidget):
         root.addWidget(self.generalTitle)
         root.addWidget(self.languageCard)
         root.addWidget(self.themeCard)
+        root.addWidget(self.bootAutostartCard)
+        root.addWidget(self.audioDeviceCard)
         root.addSpacing(8)
         root.addWidget(self.serviceTitle)
         root.addWidget(self.autostartCard)
@@ -150,13 +162,31 @@ class SettingsInterface(QWidget):
         self.languageCombo.setCurrentIndex(0 if lang == "zh" else 1)
         theme = self._config.get("theme", "auto")
         self.themeCombo.setCurrentIndex({"light": 0, "dark": 1, "auto": 2}.get(theme, 2))
+        # 开机自启：状态存在注册表，直接读取
+        from ..autostart import is_enabled
+        self.bootAutostartSwitch.setChecked(is_enabled())
+        self._reload_audio_devices()
         self.autostartSwitch.setChecked(bool(self._config.get("dlna_enabled", True)))
         self.deviceNameEdit.setText(self._config.get("friendly_name", ""))
         self.portEdit.setText(str(self._config.get("http_port", 0)))
 
+    def _reload_audio_devices(self) -> None:
+        """重新填充音频输出设备下拉（保留当前选择）。"""
+        current = self._config.get("audio_device", "")
+        self.audioDeviceCombo.blockSignals(True)
+        self.audioDeviceCombo.clear()
+        self.audioDeviceCombo.addItem(tr("settings.audio_device.default"), "")
+        for name, desc in self._player.get_audio_devices():
+            self.audioDeviceCombo.addItem(desc, name)
+        idx = self.audioDeviceCombo.findData(current)
+        self.audioDeviceCombo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.audioDeviceCombo.blockSignals(False)
+
     def _connect(self) -> None:
         self.languageCombo.currentIndexChanged.connect(self._on_language_changed)
         self.themeCombo.currentIndexChanged.connect(self._on_theme_changed)
+        self.bootAutostartSwitch.checkedChanged.connect(self._on_boot_autostart_changed)
+        self.audioDeviceCombo.currentIndexChanged.connect(self._on_audio_device_changed)
         self.autostartSwitch.checkedChanged.connect(self._on_autostart_changed)
         self.deviceNameEdit.textChanged.connect(self._on_device_name_changed)
         self.portEdit.textChanged.connect(self._on_port_changed)
@@ -176,6 +206,28 @@ class SettingsInterface(QWidget):
         setTheme(theme_map[idx])
         self._config.set("theme", code_map[idx])
 
+    def _on_boot_autostart_changed(self, checked: bool) -> None:
+        """开机自启（应用随系统启动）。"""
+        from ..autostart import disable, enable
+        ok = enable() if checked else disable()
+        if not ok:
+            self.bootAutostartSwitch.setChecked(not checked)  # 失败回滚
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            InfoBar.error(
+                title=tr("settings.autostart.fail"),
+                content=str(ok),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=4000,
+                parent=self,
+                position=InfoBarPosition.TOP,
+            )
+
+    def _on_audio_device_changed(self, idx: int) -> None:
+        name = self.audioDeviceCombo.itemData(idx) or ""
+        self._config.set("audio_device", name)
+        self._player.set_audio_device(name)
+
     def _on_autostart_changed(self, checked: bool) -> None:
         self._config.set("dlna_enabled", checked)
 
@@ -189,6 +241,11 @@ class SettingsInterface(QWidget):
         except ValueError:
             pass
 
+    def showEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().showEvent(event)
+        # 进入设置页时刷新音频设备列表（设备插拔可能变化）
+        QTimer.singleShot(0, self._reload_audio_devices)
+
     # ------------------------------------------------------------------ #
     def _retranslate(self, *_args) -> None:
         self.titleLabel.setText(tr("settings.title"))
@@ -199,6 +256,11 @@ class SettingsInterface(QWidget):
         self.themeCombo.setItemText(0, tr("settings.theme.light"))
         self.themeCombo.setItemText(1, tr("settings.theme.dark"))
         self.themeCombo.setItemText(2, tr("settings.theme.auto"))
+        self.bootAutostartCard.titleLabel.setText(tr("settings.autostart"))
+        self.bootAutostartCard.descLabel.setText(tr("settings.autostart.hint"))
+        self.audioDeviceCard.titleLabel.setText(tr("settings.audio_device"))
+        self.audioDeviceCard.descLabel.setText(tr("settings.audio_device.hint"))
+        self._reload_audio_devices()  # 默认项文案随语言变化，整体重填
         self.serviceTitle.setText(tr("settings.group.service"))
         self.autostartCard.titleLabel.setText(tr("settings.service.enabled"))
         self.autostartCard.descLabel.setText(tr("settings.service.enabled.hint"))

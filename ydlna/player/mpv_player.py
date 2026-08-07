@@ -71,6 +71,8 @@ class PlayerSignals(QObject):
     muteChanged = Signal(bool)
     # mpv 内部错误消息
     errorOccurred = Signal(str)
+    # 播放/加载失败：(标题, 技术细节)。用于 UI 友好提示
+    playbackFailed = Signal(str, str)
 
 
 class Player:
@@ -102,6 +104,11 @@ class Player:
         self._volume: int = 80
         self._muted: bool = False
         self._speed: float = 1.0
+        self._audio_device: str = ""
+        # 本次播放是否已成功装载（用于区分「加载失败」与「正常结束」）
+        self._load_ok: bool = False
+        # 最近一次播放的关键错误细节（播放失败时随 playbackFailed 上报）
+        self._last_error: str = ""
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -130,11 +137,13 @@ class Player:
             loglevel="info",
         )
         self._register_callbacks()
-        # 应用初始音量/倍速
+        # 应用初始音量/倍速/音频设备
         try:
             self._mpv.volume = self._volume
             self._mpv.mute = self._muted
             self._mpv.speed = self._speed
+            if self._audio_device:
+                self._mpv.audio_device = self._audio_device
         except Exception as e:  # 属性写入偶尔会因时机失败，忽略
             log.debug("设置初始属性失败: %s", e)
         self._attached = True
@@ -166,6 +175,10 @@ class Player:
         try:
             if loglevel == "error" or loglevel == "fatal":
                 log.error("[mpv/%s] %s", component, message.strip())
+                # 记录关键组件的错误细节（用于失败提示）；
+                # 排除解码器噪声（aac/video 的包损坏告警对定位没帮助）
+                if component in ("lavf", "ffmpeg/demuxer", "cplayer", "vd", "ad"):
+                    self._last_error = message.strip()
             elif loglevel == "warn":
                 log.warning("[mpv/%s] %s", component, message.strip())
             else:
@@ -221,6 +234,7 @@ class Player:
         @m.event_callback("file-loaded")
         def _on_file_loaded(_event):  # noqa: ANN001
             log.info("媒体已装载: %s", self._url)
+            self._load_ok = True
             self._set_state("playing")
             self.signals.mediaChanged.emit(self._title or self._url, self._url)
 
@@ -237,8 +251,12 @@ class Player:
             log.info("媒体结束 (reason=%s)", reason)
             self._position = None
             self._set_state("idle")
-            if reason == 4:
-                self.signals.errorOccurred.emit("播放出错")
+            # mpv end-file reason: 0=EOF 2=STOP 3=QUIT 4=ERROR 5=REDIRECT
+            # 播放失败（ERROR，或从未装载成功就结束）→ 上报友好提示
+            if reason == 4 or (not self._load_ok and reason not in (2, 3)):
+                detail = self._last_error
+                self._last_error = ""
+                self.signals.playbackFailed.emit(self._title, detail)
             self.signals.ended.emit()
 
         @m.event_callback("start-file")
@@ -255,6 +273,8 @@ class Player:
             return
         self._url = url
         self._title = title
+        self._load_ok = False
+        self._last_error = ""
         log.info("播放: title=%r url=%s", title, url)
         self._mpv.play(url)
 
@@ -331,6 +351,41 @@ class Player:
             self._mpv.mute = muted
         except Exception as e:
             log.debug("设置静音失败: %s", e)
+
+    # ------------------------------------------------------------------ #
+    # 音频输出设备
+    # ------------------------------------------------------------------ #
+    def get_audio_devices(self) -> list[tuple[str, str]]:
+        """可用音频输出设备列表 [(name, description)]。"""
+        if not self.available:
+            return []
+        try:
+            devices = self._mpv.audio_device_list or []
+            return [(d.get("name", ""), d.get("description", "")) for d in devices]
+        except Exception as e:  # noqa: BLE001
+            log.debug("读取音频设备列表失败: %s", e)
+            return []
+
+    def get_audio_device(self) -> str:
+        """当前音频输出设备名（"" = 默认）。"""
+        if not self.available:
+            return self._audio_device
+        try:
+            return str(self._mpv.audio_device or "")
+        except Exception:  # noqa: BLE001
+            return self._audio_device
+
+    def set_audio_device(self, name: str) -> None:
+        """设置音频输出设备（name="" 表示默认/自动）。"""
+        name = name or ""
+        self._audio_device = name
+        if not self.available:
+            return
+        try:
+            self._mpv.audio_device = name
+            log.info("音频输出设备: %r", name or "默认")
+        except Exception as e:
+            log.warning("设置音频设备失败: %s", e)
 
     # ------------------------------------------------------------------ #
     # 状态查询（供 DLNA 层用，缓存值，线程安全）

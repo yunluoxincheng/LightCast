@@ -82,6 +82,8 @@ async def run() -> int:
     # 应用保存的音量
     player.set_volume(int(config.get("volume", 80)))
     player.set_mute(bool(config.get("muted", False)))
+    # 音频输出设备（attach 时应用）
+    player.set_audio_device(config.get("audio_device", ""))
 
     bridge = RendererBridge(player)
     server = DlnaServer(bridge, config)

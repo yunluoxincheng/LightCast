@@ -29,6 +29,8 @@ DEFAULTS: dict[str, Any] = {
     # 播放器
     "volume": 80,
     "muted": False,
+    # 音频输出设备（mpv audio-device 名，"" = 默认）
+    "audio_device": "",
     # 窗口几何（x, y, w, h），None 表示用系统默认
     "window_geometry": None,
     # 是否已提示过「关闭即最小化到托盘」

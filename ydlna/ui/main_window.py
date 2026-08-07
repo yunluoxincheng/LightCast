@@ -49,7 +49,7 @@ class MainWindow(MSFluentWindow):
         # 三个子页面
         self.homeInterface = HomeInterface(player, server, self)
         self.playerInterface = PlayerInterface(player, self)
-        self.settingsInterface = SettingsInterface(config, self)
+        self.settingsInterface = SettingsInterface(config, player, self)
 
         self.addSubInterface(self.homeInterface, FIF.HOME, tr("nav.home"))
         self.addSubInterface(self.playerInterface, FIF.VIDEO, tr("nav.player"))

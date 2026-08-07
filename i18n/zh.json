@@ -1,11 +1,9 @@
 {
   "app.name": "轻投 投屏接收器",
   "app.tagline": "让你的电脑接收手机投屏",
-
   "nav.home": "主页",
   "nav.player": "播放器",
   "nav.settings": "设置",
-
   "home.title": "投屏中心",
   "home.device_name": "设备名称",
   "home.device_ip": "本机地址",
@@ -19,7 +17,6 @@
   "home.tip.no_network": "未检测到可用的本机网络地址，请检查网络连接。",
   "home.start_service": "启动投屏服务",
   "home.stop_service": "停止投屏服务",
-
   "player.empty": "等待投屏中…",
   "player.empty.hint": "从手机选择投屏目标后，媒体将在播放窗口中播放。",
   "player.unknown_title": "未知媒体",
@@ -41,7 +38,6 @@
   "player.speed": "倍速",
   "player.speed.normal": "正常",
   "player.no_playlist": "无播放列表（单媒体）",
-
   "settings.title": "设置",
   "settings.group.general": "通用",
   "settings.language": "界面语言",
@@ -51,7 +47,6 @@
   "settings.theme.light": "浅色",
   "settings.theme.dark": "深色",
   "settings.theme.auto": "跟随系统",
-
   "settings.group.service": "投屏服务",
   "settings.service.enabled": "开机自动启动投屏服务",
   "settings.service.enabled.hint": "应用启动时自动开启 DLNA 接收",
@@ -60,20 +55,17 @@
   "settings.http_port": "服务端口",
   "settings.http_port.hint": "0 表示自动分配，一般无需修改（重启应用后生效）",
   "settings.need_restart": "此设置将在下次启动应用时生效",
-
   "settings.group.about": "关于",
   "settings.about.version": "版本",
   "settings.about.description": "轻投 是一个开源的 DLNA 投屏接收软件，使用 PySide6 + libmpv 构建。",
   "settings.about.license": "许可证：GPLv3",
   "settings.about.github": "项目主页",
-
   "tray.tooltip.idle": "轻投 投屏接收器",
   "tray.tooltip.playing": "轻投 · 正在播放：{title}",
   "tray.show": "显示主窗口",
   "tray.play_pause": "播放 / 暂停",
   "tray.stop": "停止",
   "tray.quit": "退出",
-
   "dialog.minimize_to_tray.title": "最小化到系统托盘",
   "dialog.minimize_to_tray.body": "轻投 将继续在后台运行以接收投屏。点击托盘图标可重新打开窗口。",
   "dialog.dll_missing.title": "缺少 libmpv",
@@ -81,7 +73,6 @@
   "dialog.dll_missing.detail": "下载地址：https://sourceforge.net/projects/mpv-player-windows/files/libmpv/",
   "dialog.restart.title": "需要重启",
   "dialog.restart.body": "该设置将在重启轻投后生效。是否立即重启？",
-
   "common.ok": "确定",
   "common.cancel": "取消",
   "common.yes": "是",
@@ -89,5 +80,13 @@
   "common.close": "关闭",
   "common.restart": "重启",
   "common.now": "现在",
-  "common.later": "稍后"
+  "common.later": "稍后",
+  "settings.autostart": "开机自动启动轻投",
+  "settings.autostart.hint": "登录 Windows 后自动在后台运行（通过注册表实现）",
+  "settings.autostart.fail": "设置开机自启失败",
+  "settings.audio_device": "音频输出设备",
+  "settings.audio_device.hint": "选择声音从哪个设备输出（插拔设备后自动刷新）",
+  "settings.audio_device.default": "默认（自动）",
+  "player.error.play_failed": "无法播放该媒体",
+  "player.error.play_failed.hint": "请检查网络连接，或尝试其他清晰度/资源。详细原因见日志（lightcast.log）。"
 }

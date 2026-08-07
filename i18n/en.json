@@ -1,11 +1,9 @@
 {
   "app.name": "LightCast Cast Receiver",
   "app.tagline": "Turn your PC into a DLNA receiver",
-
   "nav.home": "Home",
   "nav.player": "Player",
   "nav.settings": "Settings",
-
   "home.title": "Cast Center",
   "home.device_name": "Device name",
   "home.device_ip": "Local address",
@@ -19,7 +17,6 @@
   "home.tip.no_network": "No usable local network address detected. Please check your network connection.",
   "home.start_service": "Start service",
   "home.stop_service": "Stop service",
-
   "player.empty": "Waiting for cast…",
   "player.empty.hint": "Media will play in the player window once you cast from your phone.",
   "player.unknown_title": "Unknown media",
@@ -41,7 +38,6 @@
   "player.speed": "Speed",
   "player.speed.normal": "Normal",
   "player.no_playlist": "No playlist (single media)",
-
   "settings.title": "Settings",
   "settings.group.general": "General",
   "settings.language": "Interface language",
@@ -51,7 +47,6 @@
   "settings.theme.light": "Light",
   "settings.theme.dark": "Dark",
   "settings.theme.auto": "Follow system",
-
   "settings.group.service": "Cast service",
   "settings.service.enabled": "Auto-start cast service on launch",
   "settings.service.enabled.hint": "Start DLNA receiver automatically when the app starts",
@@ -60,20 +55,17 @@
   "settings.http_port": "Service port",
   "settings.http_port.hint": "0 = auto-assign. Usually no need to change (takes effect after restart)",
   "settings.need_restart": "This setting takes effect after restarting the app",
-
   "settings.group.about": "About",
   "settings.about.version": "Version",
   "settings.about.description": "LightCast is an open-source DLNA cast receiver built with PySide6 + libmpv.",
   "settings.about.license": "License: GPLv3",
   "settings.about.github": "Project page",
-
   "tray.tooltip.idle": "LightCast Cast Receiver",
   "tray.tooltip.playing": "LightCast · Playing: {title}",
   "tray.show": "Show main window",
   "tray.play_pause": "Play / Pause",
   "tray.stop": "Stop",
   "tray.quit": "Quit",
-
   "dialog.minimize_to_tray.title": "Minimize to tray",
   "dialog.minimize_to_tray.body": "LightCast will keep running in the background to receive casts. Click the tray icon to reopen the window.",
   "dialog.dll_missing.title": "Missing libmpv",
@@ -81,7 +73,6 @@
   "dialog.dll_missing.detail": "Download: https://sourceforge.net/projects/mpv-player-windows/files/libmpv/",
   "dialog.restart.title": "Restart required",
   "dialog.restart.body": "This setting takes effect after restarting LightCast. Restart now?",
-
   "common.ok": "OK",
   "common.cancel": "Cancel",
   "common.yes": "Yes",
@@ -89,5 +80,13 @@
   "common.close": "Close",
   "common.restart": "Restart",
   "common.now": "Now",
-  "common.later": "Later"
+  "common.later": "Later",
+  "settings.autostart": "Launch LightCast at startup",
+  "settings.autostart.hint": "Run in the background automatically after logging into Windows (via registry)",
+  "settings.autostart.fail": "Failed to set startup launch",
+  "settings.audio_device": "Audio output device",
+  "settings.audio_device.hint": "Choose which device plays the sound (refreshes when devices change)",
+  "settings.audio_device.default": "Default (auto)",
+  "player.error.play_failed": "Failed to play this media",
+  "player.error.play_failed.hint": "Check your network connection, or try another quality/source. Details are in the log (lightcast.log)."
 }
