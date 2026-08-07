@@ -146,10 +146,33 @@ class RendererBridge:
     # ------------------------------------------------------------------ #
     # DLNA action → Player（由各 service 的 action handler 调用）
     # ------------------------------------------------------------------ #
-    def on_set_uri(self, url: str, meta: str) -> None:
+    async def on_set_uri(self, url: str, meta: str) -> None:
+        """设置媒体 URI。
+
+        对 m3u8 流做特殊处理：某些源的 m3u8 分片用 .jpg 扩展名伪装，
+        ffmpeg 会误判为图片导致解码失败。先下载并重写 m3u8（分片指向
+        本地代理 + .mp4 扩展名），再交给 mpv。
+        """
         title = parse_title_from_didl(meta) or url
         log.info("桥接: 设置媒体 title=%r url=%s", title, url)
-        self._player.play(url, title)
+
+        if ".m3u8" in url.lower():
+            from ..player.hls_rewriter import setup_hls_proxy
+            # 复用同一个代理（多次投屏时先停旧的）
+            proxy = getattr(self, "_hls_proxy", None)
+            if proxy is not None and proxy.running:
+                await proxy.stop()
+
+            proxy = await setup_hls_proxy(url)
+            if proxy is not None:
+                self._hls_proxy = proxy
+                log.info("播放重写后的 m3u8: %s", proxy.playlist_url)
+                self._player.play(proxy.playlist_url, title)
+                return
+            log.warning("m3u8 重写失败，回退直接播放原 URL")
+            self._player.play(url, title)
+        else:
+            self._player.play(url, title)
 
     def on_play(self) -> None:
         log.info("桥接: 播放")

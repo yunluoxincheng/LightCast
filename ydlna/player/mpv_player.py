@@ -123,6 +123,7 @@ class Player:
             osd_level=0,
             cursor_autohide=False,
             terminal=False,
+            ytdl=False,                  # 禁用 youtube-dl 解析（本地 m3u8 不需要，且会报错干扰）
             # 把 mpv 内部日志接到我们的日志体系（关键诊断基础设施：
             # 没有它，媒体解码失败时看不到任何错误，只能盲猜）
             log_handler=self._mpv_log_handler,
@@ -256,6 +257,16 @@ class Player:
         self._title = title
         log.info("播放: title=%r url=%s", title, url)
         self._mpv.play(url)
+
+    def play_local_file(self, path: str, title: str = "") -> None:
+        """播放本地文件（重写后的 m3u8 临时文件）。"""
+        if not self.available:
+            log.error("mpv 未就绪，无法播放")
+            return
+        self._url = path
+        self._title = title
+        log.info("播放本地 m3u8: title=%r path=%s", title, path)
+        self._mpv.play(path)
 
     def play_pause(self) -> None:
         if not self.available:

@@ -131,7 +131,7 @@ class AVTransportService(UpnpServerService):
         self.state_variable("AVTransportURIMetaData").value = CurrentURIMetaData or ""
         self.state_variable("TransportState").value = "STOPPED"
         if self.bridge is not None:
-            self.bridge.on_set_uri(CurrentURI, CurrentURIMetaData or "")
+            await self.bridge.on_set_uri(CurrentURI, CurrentURIMetaData or "")
         return {}
 
     @callable_action(
