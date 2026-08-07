@@ -7,7 +7,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent, QIcon
 from qfluentwidgets import (
     FluentIcon as FIF,
-    MessageBox,
     MSFluentWindow,
     NavigationItemPosition,
 )
@@ -168,26 +167,54 @@ class MainWindow(MSFluentWindow):
 
     # ------------------------------------------------------------------ #
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        """关闭窗口时最小化到托盘（首次提示）。"""
+        """关闭窗口时最小化到托盘（首次弹提示，可勾选「不再提示」）。"""
         # 保存几何
         g = self.geometry()
         self._config.set("window_geometry", [g.x(), g.y(), g.width(), g.height()])
 
         if not self._minimize_hint_shown:
-            # 首次：弹提示，告知将最小化到托盘
-            box = MessageBox(tr("dialog.minimize_to_tray.title"), tr("dialog.minimize_to_tray.body"), self)
-            box.yesButton.setText(tr("common.ok"))
-            box.cancelButton.setText(tr("common.cancel"))
-            if box.exec():
-                self._config.set("minimize_hint_shown", True)
-                self._minimize_hint_shown = True
-                self.hide()
-                self.closing.emit()
-                event.ignore()
-            else:
-                event.ignore()  # 用户取消，不关闭
+            try:
+                self._ask_minimize_to_tray()
+            except Exception as e:  # noqa: BLE001
+                # 弹窗失败绝不能把应用卡死：保持窗口可见并记录
+                log.warning("最小化提示弹窗异常: %s", e)
+            event.ignore()
         else:
-            # 已经提示过，直接最小化
+            # 已经提示过（或用户勾选「不再提示」），直接最小化
             self.hide()
             self.closing.emit()
             event.ignore()
+
+    def _ask_minimize_to_tray(self) -> None:
+        """弹「最小化到托盘」提示（带「不再提示」复选框）。
+
+        使用 Qt 原生 QMessageBox + 非阻塞 open()：不嵌套事件循环，
+        彻底避免模态对话框把应用卡死（此前 qfluentwidgets MessageBox
+        的 exec() 在打包版中点击按钮会冻结）。
+        """
+        from PySide6.QtWidgets import QCheckBox, QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("dialog.minimize_to_tray.title"))
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(tr("dialog.minimize_to_tray.body"))
+        dont_ask = QCheckBox(tr("dialog.minimize_to_tray.dont_ask"), box)
+        box.setCheckBox(dont_ask)
+        ok_btn = box.addButton(tr("common.ok"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(tr("common.cancel"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(ok_btn)
+        box.finished.connect(
+            lambda _result: self._on_minimize_answered(box, dont_ask, ok_btn)
+        )
+        # 关闭后销毁弹窗对象（否则每次点 X 都会累积一个隐藏的 QMessageBox）
+        box.finished.connect(box.deleteLater)
+        box.open()
+
+    def _on_minimize_answered(self, box, dont_ask, ok_btn) -> None:  # noqa: ANN001
+        """弹窗关闭后的回调：按勾选状态决定「记住」与「是否最小化」。"""
+        if dont_ask.isChecked():
+            self._config.set("minimize_hint_shown", True)
+            self._minimize_hint_shown = True
+            log.info("用户选择不再提示「最小化到托盘」")
+        if box.clickedButton() is ok_btn:
+            self.hide()
+            self.closing.emit()

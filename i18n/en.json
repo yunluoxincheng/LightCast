@@ -69,6 +69,7 @@
   "tray.quit": "Quit",
   "dialog.minimize_to_tray.title": "Minimize to tray",
   "dialog.minimize_to_tray.body": "LightCast will keep running in the background to receive casts. Click the tray icon to reopen the window.",
+  "dialog.minimize_to_tray.dont_ask": "Don't ask again — minimize to tray directly",
   "dialog.dll_missing.title": "Missing libmpv",
   "dialog.dll_missing.body": "mpv-2.dll was not found, the player cannot work. Please read README.md, place libmpv's mpv-2.dll into the bin/ folder, then restart.",
   "dialog.dll_missing.detail": "Download: https://sourceforge.net/projects/mpv-player-windows/files/libmpv/",

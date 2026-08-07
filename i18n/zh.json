@@ -69,6 +69,7 @@
   "tray.quit": "退出",
   "dialog.minimize_to_tray.title": "最小化到系统托盘",
   "dialog.minimize_to_tray.body": "轻投 将继续在后台运行以接收投屏。点击托盘图标可重新打开窗口。",
+  "dialog.minimize_to_tray.dont_ask": "不再提示，直接最小化到托盘",
   "dialog.dll_missing.title": "缺少 libmpv",
   "dialog.dll_missing.body": "未找到 mpv-2.dll，播放器无法工作。请阅读 README.md，将 libmpv 的 mpv-2.dll 放入 bin/ 目录后重启。",
   "dialog.dll_missing.detail": "下载地址：https://sourceforge.net/projects/mpv-player-windows/files/libmpv/",
