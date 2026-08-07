@@ -17,7 +17,7 @@
 
 ### 方式一：下载 Release（推荐）
 
-从本仓库的 **Releases** 页面下载最新版本：
+从本仓库的 [Releases](https://github.com/yunluoxincheng/LightCast/releases) 页面下载最新版本：
 
 - **`LightCast-Setup-<版本>.exe`** —— 安装程序（含开始菜单/桌面快捷方式、卸载程序）
 - 或**便携版压缩包** —— 解压即用
