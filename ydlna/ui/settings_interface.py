@@ -14,6 +14,7 @@ from qfluentwidgets import (
     FluentIcon as FIF,
     LineEdit,
     PushButton,
+    ScrollArea,
     StrongBodyLabel,
     SubtitleLabel,
     SwitchButton,
@@ -77,7 +78,14 @@ class SettingsInterface(QWidget):
         Translator.instance().languageChanged.connect(self._retranslate)
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        # 内容包进滚动区：设置页内容（~1000px 高）不再撑大窗口的最小高度，
+        # 窗口才能自由缩放到任意尺寸（此前窗口最小高度被设置页卡死在 1055）
+        self.scrollArea = ScrollArea(self)
+        self.scrollWidget = QWidget(self.scrollArea)
+        self.scrollArea.setWidget(self.scrollWidget)
+        self.scrollArea.setWidgetResizable(True)
+
+        root = QVBoxLayout(self.scrollWidget)
         root.setContentsMargins(36, 24, 36, 24)
         root.setSpacing(14)
 
@@ -156,6 +164,12 @@ class SettingsInterface(QWidget):
         root.addWidget(self.aboutTitle)
         root.addWidget(self.aboutCard)
         root.addStretch(1)
+
+        # 外层布局：滚动区铺满整个页面
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self.scrollArea)
 
     def _load_values(self) -> None:
         lang = self._config.get("language", "zh")

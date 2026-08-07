@@ -73,8 +73,8 @@ class MainWindow(MSFluentWindow):
             phys_h = min(phys_h, int(avail.height() * dpr) - 80)
         self.resize(int(phys_w / dpr), int(phys_h / dpr))
         self.setMinimumSize(900, 600)
-        if not config.get("window_geometry_v5", False):
-            config.set("window_geometry_v5", True)
+        if not config.get("window_geometry_v6", False):
+            config.set("window_geometry_v6", True)
         else:
             geom = config.get("window_geometry")
             if isinstance(geom, list) and len(geom) == 4:
