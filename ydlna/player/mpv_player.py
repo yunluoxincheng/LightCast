@@ -142,6 +142,10 @@ class Player:
             self._mpv.volume = self._volume
             self._mpv.mute = self._muted
             self._mpv.speed = self._speed
+            # 直播流重载上限：新版 ffmpeg 把 HLS max_reload 从 1000 降到 3，
+            # 直播播放列表刷新稍慢就会提前退出（"Failed to reload playlist"）；
+            # 调回 1000。失败不影响启动（属性写入偶尔会因时机失败）
+            self._mpv.demuxer_lavf_o = ["max_reload=1000"]
             if self._audio_device:
                 self._mpv.audio_device = self._audio_device
         except Exception as e:  # 属性写入偶尔会因时机失败，忽略

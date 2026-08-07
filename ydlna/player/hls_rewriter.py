@@ -1,4 +1,4 @@
-"""HLS 流本地代理 —— 解决 ffmpeg 对 .jpg 分片误判为图片的问题。
+"""HLS / 直链流本地代理 —— 解决 ffmpeg 分片识别与防盗链问题。
 
 背景
 ----
@@ -8,10 +8,22 @@
 （症状：媒体已装载但黑屏、"Invalid data found when processing input"）。
 
 已验证：分片扩展名改成 ``.mp4`` 后 mpv 能正确识别 h264 1080p 并正常播放。
+新版 ffmpeg（2025-01 起）对分片扩展名做了白名单检查（extension_picky），
+非白名单扩展名（``.jpg``/``.m4s``/``.cmfv``/无扩展名）都会被直接拒绝，
+因此代理把分片统一改名为 ``.mp4``/``.ts``/``.avi`` 是一并兜住的。
 
-另外，加密流（``#EXT-X-KEY``，AES-128）的密钥 URI 和 fMP4 的初始化段
+加密流（``#EXT-X-KEY``，AES-128）的密钥 URI 和 fMP4 的初始化段
 （``#EXT-X-MAP``）若保持相对地址，会解析到本地代理的 404 —— 也必须
 一并重写到本地端点并转发。
+
+防盗链（403 是最常见的"换番报错"来源）
+--------------------------------------
+番剧站 CDN 普遍校验 Referer / User-Agent，mpv 裸请求会被 403 拒绝。
+本代理对所有上游请求（m3u8/分片/密钥/初始化段/探测/预热）自动附加
+``Referer: 源站 origin`` + 浏览器 UA，并用同一个会话（cookie jar 跟随
+302 跳转自动累积）；网络错误 / 5xx 自动重试一次；上游 200 但返回 HTML
+（登录墙/防盗链错误页）时识别出来并返回 502，让用户看到友好提示而不是
+mpv 的"Invalid data"。
 
 图像流（漫画/图文番，分片是真实 PNG/JPEG 图片）
 ------------------------------------------------
@@ -26,17 +38,36 @@ ffmpeg 的 HLS demuxer 无法直接播放图片分片（``Video: png`` +
 增量读取（AVI 解复用器对 ``avio_size`` 失败有回退），EXTINF 时长、
 进度、seek 全部保留。
 
+混合分片（PNG 封面 + TS 视频，番剧站省流量的常见套路）
+-----------------------------------------------------
+某些站把"小 PNG 封面 + 完整 MPEG-TS 视频"拼成一个文件（PNG 头 ~212 字节
+伪装成图片上传图床）。播放时必须剥掉 PNG 前缀、从 TS 起点（连续 0x47
+同步字节）提供。
+
+主播放列表 / 直播流
+-------------------
+- 主播放列表（只有 ``#EXT-X-STREAM-INF`` + 变体）：递归跟进第一个变体。
+- 直播流（无 ``#EXT-X-ENDLIST``）：不代理 —— 快照式静态列表永远不会
+  刷新，会播几秒就断流；交由 mpv 原生播放（其 HLS demuxer 自带列表刷新，
+  配合 ``demuxer-lavf-o=max_reload=1000`` 可长期播放）。
+
 方案（直接接收播放，无文件、无额外步骤）
 --------------------------------------
-1. 收到 m3u8 URL → 下载 m3u8 文本
+1. 收到 m3u8 URL → 下载 m3u8 文本（防盗链头 + 重试，302 后按最终地址解析）
 2. 启动本地代理（aiohttp，内存态），提供端点：
    - ``/playlist.m3u8``：返回重写后的 m3u8
    - ``/seg/{n}.mp4``：转发真实分片（保留 Range/206 语义 + 防盗链 header）
    - ``/seg/{n}.avi``：图像流分片（PNG→JPEG→AVI，惰性转换 + 内存缓存）
-   - ``/key/{n}.key``：转发 AES-128 密钥（内存缓存，密钥很小）
+   - ``/seg/{n}.ts``：混合分片（PNG 封面+TS，剥掉封面按 TS 提供）
+   - ``/key/{n}.key``：转发 AES-128 密钥（内存缓存，校验 16 字节）
    - ``/map/{n}.mp4``：转发 fMP4 初始化段
-   所有 URI（分片/密钥/初始化段）都按 m3u8 的基地址解析成绝对 URL 后转发
+   所有 URI（分片/密钥/初始化段）都按 m3u8 的最终基地址解析成绝对 URL 后转发
 3. mpv 只播放一个 URL：``http://127.0.0.1:{port}/playlist.m3u8`` —— 走标准 HLS 路径
+
+非 m3u8 直链（DirectProxy）
+---------------------------
+直链也走本地代理：同样带防盗链头 + 重试；内容按探测结果分三种模式：
+视频转发（保留 Range）/ 纯图片转 AVI / PNG 头+TS 剥离（缓存 + Range 支持）。
 """
 from __future__ import annotations
 
@@ -45,7 +76,7 @@ import io
 import re
 import struct
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -66,6 +97,25 @@ _IMAGE_MAGICS: tuple[tuple[bytes, str], ...] = (
     (b"RIFF", "webp"),
 )
 
+# hybrid/图像模式的整段缓冲上限（防大分片 OOM）
+_MAX_BUFFER = 96 * 1024 * 1024
+
+# 防盗链：所有上游请求默认带浏览器 UA；Referer 用源站 origin
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+# 请求超时（内部小请求 15s，整段缓冲 60s；转发流式请求不设上限）
+_TIMEOUT = aiohttp.ClientTimeout(total=15)
+_TIMEOUT_BIG = aiohttp.ClientTimeout(total=60)
+
+
+def _origin(url: str) -> str:
+    """URL 的源站（scheme://netloc），用作防盗链 Referer。"""
+    p = urlsplit(url)
+    return f"{p.scheme}://{p.netloc}"
+
 
 def _detect_image(data: bytes) -> Optional[str]:
     """按魔数判断数据是否为图片，返回类型名或 None。"""
@@ -77,16 +127,24 @@ def _detect_image(data: bytes) -> Optional[str]:
     return None
 
 
-def _find_ts_offset(data: bytes) -> Optional[int]:
-    """找 MPEG-TS 数据起点：第一个 0x47 同步字节（且 188 字节后有第二个同步）。
+def _find_ts_offset(data: bytes, syncs: int = 4) -> Optional[int]:
+    """找 MPEG-TS 数据起点：连续 syncs 个 0x47 同步字节（188 字节间隔）。
 
     某些视频站的分片是"小 PNG 封面 + 附加完整 TS 视频"的混合文件，
-    播放时必须剥掉 PNG 前缀、从 TS 起点提供。
+    播放时必须剥掉 PNG 前缀、从 TS 起点提供。要求 4 个连续同步字节，
+    把纯图片内容里随机撞上 0x47 的概率压到 ~1/2^32，几乎不可能误判。
     """
-    for i in range(len(data) - 188):
-        if data[i] == 0x47 and data[i + 188] == 0x47:
+    span = 188 * (syncs - 1)
+    for i in range(len(data) - span):
+        if all(data[i + 188 * k] == 0x47 for k in range(syncs)):
             return i
     return None
+
+
+def _looks_html(data: bytes) -> bool:
+    """判断内容是否为 HTML 页面（防盗链/登录墙经常 200 返回 HTML 错误页）。"""
+    head = data[:512].lstrip().lower()
+    return head.startswith((b"<html", b"<!doctype", b"<?xml"))
 
 
 def _make_avi(jpeg: bytes, width: int, height: int) -> bytes:
@@ -153,26 +211,34 @@ def _make_avi(jpeg: bytes, width: int, height: int) -> bytes:
     return riff + hdrl + movi + idx1
 
 
-class HlsProxy:
-    """m3u8 本地代理：提供重写后的播放列表 + 分片/密钥/初始化段转发。"""
+async def _read_capped(resp: aiohttp.ClientResponse, what: str,
+                       cap: int = _MAX_BUFFER) -> Optional[bytes]:
+    """整段读上游响应，超过上限返回 None（hybrid/图片模式防 OOM）。"""
+    buf = bytearray()
+    try:
+        async for chunk in resp.content.iter_chunked(256 * 1024):
+            buf += chunk
+            if len(buf) > cap:
+                log.warning("%s超过缓冲上限 %d MB，放弃", what, cap // (1024 * 1024))
+                return None
+    except (aiohttp.ClientError, asyncio.CancelledError, OSError) as e:
+        log.warning("%s读取中断: %s", what, e)
+        return None
+    return bytes(buf)
+
+
+class _BaseProxy:
+    """本地代理公共部分：会话（cookie jar 共享）、端口、防盗链头、重试、Range 转发。"""
+
+    _endpoint = ""
 
     def __init__(self) -> None:
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
         self._port: int = 0
-        self._segments: list[str] = []
-        self._keys: list[str] = []
-        self._maps: list[str] = []
-        self._key_cache: dict[str, bytes] = {}
-        self._playlist: str = ""
         self._session: Optional[aiohttp.ClientSession] = None
-        # 图像流模式：分片是真实图片（PNG/JPEG...），转 MJPEG/AVI 后播放
-        self._mode: str = "video"  # "video" | "image" | "hybrid"
-        self._jpeg_cache: dict[int, bytes] = {}
-        self._jpeg_sizes: dict[int, tuple[int, int]] = {}
-        # hybrid 模式：PNG 封面 + TS 视频混合分片 → 剥前缀缓存
-        self._ts_cache: dict[int, bytes] = {}
-        self._ts_cache_order: list[int] = []
+        self._referer: str = ""
+        self._url: str = ""
 
     @property
     def port(self) -> int:
@@ -184,50 +250,17 @@ class HlsProxy:
 
     @property
     def playlist_url(self) -> str:
-        return f"http://127.0.0.1:{self._port}/playlist.m3u8"
+        return f"http://127.0.0.1:{self._port}{self._endpoint}"
 
-    async def start(
-        self,
-        segments: list[str],
-        playlist: str,
-        keys: Optional[list[str]] = None,
-        maps: Optional[list[str]] = None,
-        mode: str = "video",
-    ) -> None:
-        """启动代理。
-
-        segments/keys/maps 是解析好的绝对 URL；playlist 是重写后的 m3u8
-        文本（其中 ``{BASE}`` 占位符稍后替换为实际端口）。
-        mode:
-        - "video"：普通视频分片（转发，保留 Range/206）
-        - "image"：纯图片分片（漫画页），转 MJPEG/AVI 提供
-        - "hybrid"：PNG 封面+TS 视频混合分片，剥掉封面按 .ts 提供
-        """
+    async def start(self, url: str) -> None:
+        """启动本地代理（复用 setup_* 阶段注入的会话，cookie jar 连续）。"""
         if self._site is not None:
             await self.stop()
-        self._segments = segments
-        self._keys = list(keys or [])
-        self._maps = list(maps or [])
-        self._key_cache = {}
-        self._playlist = playlist
-        self._session = aiohttp.ClientSession()
-        self._mode = mode
-        self._jpeg_cache = {}
-        self._jpeg_sizes = {}
-        self._ts_cache = {}
-        self._ts_cache_order = []
-
+        self._url = url
+        if self._session is None:
+            self._session = aiohttp.ClientSession()
         app = web.Application()
-        app.router.add_get("/playlist.m3u8", self._handle_playlist)
-        if mode == "image":
-            app.router.add_get("/seg/{index}.avi", self._handle_image_segment)
-        elif mode == "hybrid":
-            app.router.add_get("/seg/{index}.ts", self._handle_hybrid_segment)
-        else:
-            app.router.add_get("/seg/{index}.mp4", self._handle_segment)
-        app.router.add_get("/key/{index}.key", self._handle_key)
-        app.router.add_get("/map/{index}.mp4", self._handle_map)
-
+        self._register_routes(app)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, "127.0.0.1", 0)  # 端口 0 = 自动分配
@@ -235,8 +268,10 @@ class HlsProxy:
         sockets = self._site._server.sockets  # noqa: SLF001
         if sockets:
             self._port = sockets[0].getsockname()[1]
-        log.info("HLS 代理已启动: %s，%d 个分片，%d 个密钥，%d 个初始化段",
-                 self.playlist_url, len(segments), len(self._keys), len(self._maps))
+        log.info("本地代理已启动: %s", self.playlist_url)
+
+    def _register_routes(self, app: web.Application) -> None:  # noqa: ANN001
+        raise NotImplementedError
 
     async def stop(self) -> None:
         if self._site is not None:
@@ -258,27 +293,162 @@ class HlsProxy:
                 log.debug("关 session 异常: %s", e)
             self._session = None
         self._port = 0
-        log.info("HLS 代理已停止")
+        log.info("本地代理已停止")
 
-    # ------------------------------------------------------------------ #
-    # 上游请求（转发客户端 header，防止防盗链）
-    # ------------------------------------------------------------------ #
-    async def _open_upstream(
-        self,
-        url: str,
-        request: web.Request,
-        *,
-        strip_range: bool = False,
-    ) -> Optional[aiohttp.ClientResponse]:
+    def _default_headers(self) -> dict[str, str]:
+        headers = {"User-Agent": _BROWSER_UA}
+        if self._referer:
+            headers["Referer"] = self._referer
+        return headers
+
+    async def _get(self, url: str, *, headers: Optional[dict[str, str]] = None,
+                   retries: int = 1,
+                   timeout: Optional[aiohttp.ClientTimeout] = None,
+                   ) -> Optional[aiohttp.ClientResponse]:
+        """内部请求（m3u8/探测/预热/密钥/整段缓冲）：防盗链头 + 重试。"""
         assert self._session is not None
+        hdrs = self._default_headers()
+        if headers:
+            hdrs.update(headers)
+        last_exc: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            try:
+                resp = await self._session.get(url, headers=hdrs, timeout=timeout)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                last_exc = e
+                if attempt < retries:
+                    await asyncio.sleep(0.4 * (attempt + 1))
+                continue
+            if resp.status >= 500 and attempt < retries:
+                log.warning("上游 HTTP %s（%s），重试", resp.status, url)
+                resp.close()
+                await asyncio.sleep(0.4 * (attempt + 1))
+                continue
+            return resp
+        log.warning("请求上游 %s 失败: %s", url, last_exc)
+        return None
+
+    async def _forward_url(self, request: web.Request, real_url: str,
+                           what: str) -> web.StreamResponse:
+        """转发单个上游 URL（保留 Range/206 语义 + 防盗链头 + 重试）。
+
+        mpv 依赖 Range 分段拉取（206），客户端头原样转发；
+        上游 5xx / 网络错误重试一次；200 但返回 HTML 时判为登录墙/防盗链页。
+        """
+        assert self._session is not None
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in ("host", "connection", "accept-encoding")}
+        headers.update(self._default_headers())
+        resp: Optional[aiohttp.ClientResponse] = None
+        for attempt in range(2):
+            try:
+                resp = await self._session.get(real_url, headers=headers)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                log.warning("代理%s %s 网络错误: %s", what, real_url, e)
+                resp = None
+            if resp is not None and resp.status < 500:
+                break
+            if resp is not None:
+                resp.close()
+                if attempt == 0:
+                    log.warning("%s上游返回 HTTP %s，重试: %s",
+                                what, resp.status, real_url)
+                    await asyncio.sleep(0.4)
+        if resp is None:
+            return web.Response(status=502, text="proxy error")
+        if resp.status not in (200, 206):
+            log.warning("%s上游返回 HTTP %s: %s", what, resp.status, real_url)
+            return web.Response(status=resp.status, text="upstream error")
+        # 先取前 4KB 判断是否为 HTML 错误页（防盗链/登录墙常 200 返回 HTML）
+        first = await resp.content.read(4096)
+        if first and _looks_html(first):
+            log.warning("%s上游返回 HTML 页面（疑似登录墙/防盗链页）: %s",
+                        what, real_url)
+            resp.close()
+            return web.Response(status=502, text="upstream html")
+
+        stream = web.StreamResponse(status=resp.status)
+        stream.content_type = "video/mp4"  # 强制视频 MIME，避免按扩展名误判
+        for h in ("Content-Length", "Content-Range", "Accept-Ranges", "Cache-Control"):
+            if h in resp.headers:
+                stream.headers[h] = resp.headers[h]
+        await stream.prepare(request)
         try:
-            headers = {k: v for k, v in request.headers.items()
-                       if k.lower() not in ("host", "connection", "accept-encoding")
-                       and not (strip_range and k.lower() in ("range", "if-range"))}
-            return await self._session.get(url, headers=headers)
-        except Exception as e:  # noqa: BLE001
-            log.warning("代理上游 %s 失败: %s", url, e)
-            return None
+            if first:
+                await stream.write(first)
+            async for chunk in resp.content.iter_chunked(64 * 1024):
+                try:
+                    await stream.write(chunk)
+                except (ConnectionResetError, ConnectionError, OSError):
+                    log.debug("客户端提前断开（正常）")
+                    break
+        except (ConnectionResetError, asyncio.CancelledError, ConnectionError):
+            log.debug("%s传输中断", what)
+        finally:
+            resp.close()
+        try:
+            await stream.write_eof()
+        except (ConnectionResetError, ConnectionError, OSError):
+            pass
+        return stream
+
+
+class HlsProxy(_BaseProxy):
+    """m3u8 本地代理：重写后的播放列表 + 分片/密钥/初始化段转发。"""
+
+    _endpoint = "/playlist.m3u8"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._segments: list[str] = []
+        self._keys: list[str] = []
+        self._maps: list[str] = []
+        self._key_cache: dict[str, bytes] = {}
+        self._playlist: str = ""
+        # 图像流模式：分片是真实图片（PNG/JPEG...），转 MJPEG/AVI 后播放
+        self._mode: str = "video"  # "video" | "image" | "hybrid"
+        self._jpeg_cache: dict[int, bytes] = {}
+        self._jpeg_sizes: dict[int, tuple[int, int]] = {}
+        # hybrid 模式：PNG 封面 + TS 视频混合分片 → 剥前缀缓存
+        self._ts_cache: dict[int, bytes] = {}
+        self._ts_cache_order: list[int] = []
+
+    async def start(self, segments: list[str], playlist: str,
+                    keys: Optional[list[str]] = None,
+                    maps: Optional[list[str]] = None,
+                    mode: str = "video", *, referer: str = "") -> None:
+        """启动 HLS 代理。
+
+        segments/keys/maps 是解析好的绝对 URL；playlist 是重写后的 m3u8
+        文本（其中 ``{BASE}`` 占位符稍后替换为实际端口）。
+        mode:
+        - "video"：普通视频分片（转发，保留 Range/206）
+        - "image"：纯图片分片（漫画页），转 MJPEG/AVI 提供
+        - "hybrid"：PNG 封面+TS 视频混合分片，剥掉封面按 .ts 提供
+        """
+        self._segments = segments
+        self._keys = list(keys or [])
+        self._maps = list(maps or [])
+        self._key_cache = {}
+        self._playlist = playlist
+        self._mode = mode
+        self._jpeg_cache = {}
+        self._jpeg_sizes = {}
+        self._ts_cache = {}
+        self._ts_cache_order = []
+        self._referer = referer
+        await super().start("")
+
+    def _register_routes(self, app: web.Application) -> None:  # noqa: ANN001
+        app.router.add_get("/playlist.m3u8", self._handle_playlist)
+        if self._mode == "image":
+            app.router.add_get("/seg/{index}.avi", self._handle_image_segment)
+        elif self._mode == "hybrid":
+            app.router.add_get("/seg/{index}.ts", self._handle_hybrid_segment)
+        else:
+            app.router.add_get("/seg/{index}.mp4", self._handle_segment)
+        app.router.add_get("/key/{index}.key", self._handle_key)
+        app.router.add_get("/map/{index}.mp4", self._handle_map)
 
     # ------------------------------------------------------------------ #
     async def _handle_playlist(self, _request: web.Request) -> web.Response:
@@ -299,61 +469,36 @@ class HlsProxy:
             return web.Response(status=404, text="map not found")
         return await self._forward_url(request, self._maps[index], "初始化段")
 
-    async def _forward_url(
-        self, request: web.Request, real_url: str, what: str
-    ) -> web.StreamResponse:
-        """转发单个上游 URL（保留 Range/206 语义，mpv 依赖分段拉取）。"""
-        log.debug("代理%s %d → %s", what, request.match_info.get("index"), real_url)
-        resp = await self._open_upstream(real_url, request)
-        if resp is None:
-            return web.Response(status=502, text="proxy error")
-        if resp.status not in (200, 206):
-            log.warning("%s上游返回 HTTP %s: %s", what, resp.status, real_url)
-            return web.Response(status=resp.status, text="upstream error")
-
-        stream = web.StreamResponse(status=resp.status)
-        stream.content_type = "video/mp4"  # 强制视频 MIME，避免按扩展名误判
-        for h in ("Content-Length", "Content-Range", "Accept-Ranges", "Cache-Control"):
-            if h in resp.headers:
-                stream.headers[h] = resp.headers[h]
-        await stream.prepare(request)
-        try:
-            async for chunk in resp.content.iter_chunked(64 * 1024):
-                try:
-                    await stream.write(chunk)
-                except (ConnectionResetError, ConnectionError, OSError):
-                    log.debug("客户端提前断开（正常）")
-                    break
-        except (ConnectionResetError, asyncio.CancelledError, ConnectionError):
-            log.debug("%s传输中断", what)
-        finally:
-            resp.close()
-        try:
-            await stream.write_eof()
-        except (ConnectionResetError, ConnectionError, OSError):
-            pass
-        return stream
-
     async def _handle_key(self, request: web.Request) -> web.Response:
-        """转发 AES-128 密钥（内存缓存——ffmpeg 每个分片都会请求一次密钥）。
+        """转发 AES-128 密钥（内存缓存 + 16 字节校验）。
 
         ffmpeg 的 HLS demuxer 请求密钥时会带 Range 头，上游会因此返回
         206 部分内容；密钥只有 16 字节，这里忽略 Range 总是取完整内容，
-        再以 200 返回。
+        再以 200 返回。密钥不是 16 字节 = 上游返回了错误内容（常见：
+        防盗链把 HTML 错误页伪装成 200），直接 502 让用户看到友好提示。
         """
         index = int(request.match_info["index"])
         if index >= len(self._keys):
             return web.Response(status=404, text="key not found")
         url = self._keys[index]
         if url not in self._key_cache:
-            resp = await self._open_upstream(url, request, strip_range=True)
+            headers = {k: v for k, v in request.headers.items()
+                       if k.lower() not in ("host", "connection", "accept-encoding",
+                                            "range", "if-range")}
+            resp = await self._get(url, headers=headers, timeout=_TIMEOUT)
             if resp is None:
                 return web.Response(status=502, text="proxy error")
             if resp.status not in (200, 206):
                 log.warning("密钥 %s 上游返回 HTTP %s", url, resp.status)
                 return web.Response(status=resp.status, text="upstream error")
-            self._key_cache[url] = await resp.read()
-            log.debug("密钥已缓存: %s (%d 字节)", url, len(self._key_cache[url]))
+            data = await resp.read()
+            resp.close()
+            if len(data) != 16:
+                log.warning("密钥长度异常 %d 字节（AES-128 应为 16），"
+                            "可能被防盗链拦截: %s", len(data), url)
+                return web.Response(status=502, text="key length invalid")
+            self._key_cache[url] = data
+            log.debug("密钥已缓存: %s (16 字节)", url)
         return web.Response(
             body=self._key_cache[url],
             content_type="application/octet-stream",
@@ -377,14 +522,25 @@ class HlsProxy:
     async def _buffer_hybrid(self, index: int, request: web.Request) -> bool:
         """下载混合分片 → 剥掉封面 → 缓存。"""
         url = self._segments[index]
-        resp = await self._open_upstream(url, request, strip_range=True)
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in ("host", "connection", "accept-encoding",
+                                        "range", "if-range")}
+        resp = await self._get(url, headers=headers, timeout=_TIMEOUT_BIG)
         if resp is None:
             log.warning("混合分片 %d 上游不可达: %s", index, url)
             return False
         if resp.status != 200:
             log.warning("混合分片 %d 上游返回 HTTP %s", index, resp.status)
+            resp.close()
             return False
-        data = await resp.read()
+        data = await _read_capped(resp, f"混合分片 {index}")
+        resp.close()
+        if data is None:
+            return False
+        if _looks_html(data):
+            log.warning("混合分片 %d 上游返回 HTML（疑似登录墙/防盗链页）: %s",
+                        index, url)
+            return False
         off = _find_ts_offset(data)
         if off is None:
             log.warning("混合分片 %d 未找到 TS 同步字节（%d 字节）", index, len(data))
@@ -413,17 +569,17 @@ class HlsProxy:
             self._ts_cache.pop(oldest, None)
 
     async def _warm_hybrid_segment(self, index: int) -> None:
-        """预取一个混合分片到缓存。"""
+        """预取一个混合分片到缓存（防盗链头由 _get 附加）。"""
         url = self._segments[index]
-        try:
-            assert self._session is not None
-            resp = await self._session.get(url)
-            if resp.status != 200:
-                resp.close()
-                return
-            data = await resp.read()
-        except Exception as e:  # noqa: BLE001
-            log.debug("混合分片 %d 预热失败: %s", index, e)
+        resp = await self._get(url, retries=0, timeout=_TIMEOUT_BIG)
+        if resp is None:
+            return
+        if resp.status != 200:
+            resp.close()
+            return
+        data = await _read_capped(resp, f"混合分片 {index}（预热）")
+        resp.close()
+        if data is None:
             return
         off = _find_ts_offset(data)
         if off is not None:
@@ -435,14 +591,17 @@ class HlsProxy:
     # ------------------------------------------------------------------ #
     # 图像流模式：图片 → JPEG → 单帧 AVI（惰性转换 + 内存缓存）
     # ------------------------------------------------------------------ #
-    async def _handle_image_segment(self, request: web.Request) -> web.Response:
+    async def _handle_image_segment(self, request: web.Request) -> web.StreamResponse:
         index = int(request.match_info["index"])
         if index >= len(self._segments):
             return web.Response(status=404, text="segment not found")
         if index not in self._jpeg_cache:
             ok = await self._convert_segment(index, request)
             if not ok:
-                return web.Response(status=502, text="image conversion failed")
+                # 转换失败（比如混合流里某段其实是视频）→ 回退原始转发，
+                # mpv 也许还能直接吃下
+                log.warning("图片分片 %d 转换失败，回退原始转发", index)
+                return await self._forward_url(request, self._segments[index], "分片")
         jpeg = self._jpeg_cache[index]
         w, h = self._jpeg_sizes[index]
         avi = _make_avi(jpeg, w, h)
@@ -451,14 +610,21 @@ class HlsProxy:
     async def _convert_segment(self, index: int, request: web.Request) -> bool:
         """下载原始图片分片 → 转 JPEG → 缓存。失败返回 False。"""
         url = self._segments[index]
-        resp = await self._open_upstream(url, request, strip_range=True)
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in ("host", "connection", "accept-encoding",
+                                        "range", "if-range")}
+        resp = await self._get(url, headers=headers, timeout=_TIMEOUT_BIG)
         if resp is None:
             log.warning("图片分片 %d 上游不可达: %s", index, url)
             return False
         if resp.status != 200:
             log.warning("图片分片 %d 上游返回 HTTP %s", index, resp.status)
+            resp.close()
             return False
-        data = await resp.read()
+        data = await _read_capped(resp, f"图片分片 {index}")
+        resp.close()
+        if data is None:
+            return False
         try:
             from PIL import Image
 
@@ -476,43 +642,165 @@ class HlsProxy:
         return True
 
 
-async def _probe_first_bytes(url: str, size: int = 32) -> bytes:
-    """取 URL 内容的前 size 字节（用 Range 请求，避免下载整个文件）。"""
-    async with aiohttp.ClientSession() as session:
-        headers = {"Range": f"bytes=0-{size - 1}"}
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with session.get(url, headers=headers, timeout=timeout) as resp:
-            if resp.status not in (200, 206):
-                raise OSError(f"探测失败: HTTP {resp.status}")
-            return await resp.read()
+class DirectProxy(_BaseProxy):
+    """非 m3u8 直链的本地代理：防盗链头 + 重试 + 内容模式兼容。
+
+    模式（按首 64KB 探测）：
+    - "video"：普通媒体 → 原样转发（保留 Range/206）
+    - "image"：纯图片（漫画页直链）→ 转单帧 AVI
+    - "hybrid"：PNG 封面 + TS 视频 → 剥掉封面按 TS 提供（缓存 + Range 支持）
+    """
+
+    _endpoint = "/stream"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._mode: str = "video"
+        self._data: Optional[bytes] = None  # image/hybrid 模式的缓冲（剥离/转换后）
+
+    def _register_routes(self, app: web.Application) -> None:  # noqa: ANN001
+        app.router.add_get("/stream", self._handle_stream)
+
+    async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
+        if self._mode == "video":
+            return await self._forward_url(request, self._url, "媒体")
+        if self._data is None:
+            ok = await self._buffer_once(request)
+            if not ok:
+                return web.Response(status=502, text="buffer failed")
+            if self._mode == "video":
+                # 图片转换失败回退：原样转发
+                return await self._forward_url(request, self._url, "媒体")
+        return self._serve_cached(request)
+
+    async def _buffer_once(self, request: web.Request) -> bool:
+        """整段下载直链 → 按模式剥离/转换 → 缓存。"""
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in ("host", "connection", "accept-encoding",
+                                        "range", "if-range")}
+        resp = await self._get(self._url, headers=headers, timeout=_TIMEOUT_BIG)
+        if resp is None:
+            log.warning("直链上游不可达: %s", self._url)
+            return False
+        if resp.status != 200:
+            log.warning("直链上游返回 HTTP %s: %s", resp.status, self._url)
+            resp.close()
+            return False
+        data = await _read_capped(resp, "直链媒体")
+        resp.close()
+        if data is None or _looks_html(data):
+            return False
+        if self._mode == "hybrid":
+            off = _find_ts_offset(data)
+            if off is None:
+                log.warning("直链未找到 TS 同步字节，无法剥离封面")
+                return False
+            self._data = data[off:]
+            log.info("直链已剥离 %d 字节封面，TS %d 字节", off, len(self._data))
+        else:  # image
+            try:
+                from PIL import Image
+
+                img = Image.open(io.BytesIO(data))
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, "JPEG", quality=88)
+                self._data = _make_avi(buf.getvalue(), *img.size)
+                log.info("直链图片已转 AVI (%d 字节)", len(self._data))
+            except Exception as e:  # noqa: BLE001
+                log.warning("直链图片转换失败，回退原始转发: %s", e)
+                self._mode = "video"
+        return True
+
+    def _serve_cached(self, request: web.Request) -> web.Response:
+        """从内存缓冲提供内容（支持 Range，mpv seek 会发）。"""
+        data = self._data
+        assert data is not None
+        start, end, status = 0, len(data) - 1, 200
+        rng = request.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            try:
+                a, _, b = rng[6:].partition("-")
+                s = int(a) if a else 0
+                e = int(b) if b else len(data) - 1
+                if s >= len(data):
+                    return web.Response(
+                        status=416,
+                        headers={"Content-Range": f"bytes */{len(data)}"},
+                    )
+                start, end, status = s, min(e, len(data) - 1), 206
+            except ValueError:
+                pass
+        resp = web.Response(body=data[start:end + 1], status=status)
+        resp.content_type = ("video/mp2t" if self._mode == "hybrid"
+                             else "video/x-msvideo")
+        resp.headers["Accept-Ranges"] = "bytes"
+        if status == 206:
+            resp.headers["Content-Range"] = f"bytes {start}-{end}/{len(data)}"
+        return resp
 
 
 # --------------------------------------------------------------------------- #
 # m3u8 下载 + 重写
 # --------------------------------------------------------------------------- #
-async def setup_hls_proxy(m3u8_url: str) -> Optional[HlsProxy]:
+async def setup_hls_proxy(m3u8_url: str, depth: int = 0) -> Optional[HlsProxy]:
     """下载 m3u8、启动本地代理、重写分片/密钥/初始化段 URL。
 
     返回已启动的 HlsProxy（其 playlist_url 可直接交给 mpv 播放），
-    失败返回 None。
+    失败返回 None（调用方回退直接播放）。depth 用于主播放列表递归跟进。
     """
     proxy = HlsProxy()
+    proxy._session = aiohttp.ClientSession()  # 会话贯穿下载/转发，cookie 连续
+    session = proxy._session
+
+    async def abort(reason: str) -> None:
+        """失败路径：关掉会话并返回 None。"""
+        log.warning(reason)
+        await session.close()
+        return None
+
     try:
-        async with aiohttp.ClientSession() as session:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with session.get(m3u8_url, timeout=timeout) as resp:
-                if resp.status != 200:
-                    log.warning("下载 m3u8 失败: HTTP %s", resp.status)
-                    return None
-                text = await resp.text()
+        # 防盗链 Referer 先从原始 URL 取（m3u8 本身也可能校验 Referer）
+        proxy._referer = _origin(m3u8_url)
+        resp = await proxy._get(m3u8_url, retries=1, timeout=_TIMEOUT)
+        if resp is None:
+            return await abort(f"下载 m3u8 失败（网络错误）: {m3u8_url}")
+        if resp.status != 200:
+            return await abort(f"下载 m3u8 失败: HTTP {resp.status}")
+        body = await resp.read()
+        resp.close()
+        if _looks_html(body):
+            return await abort(f"m3u8 返回 HTML（疑似登录墙/防盗链页）: {m3u8_url}")
+        text = body.decode("utf-8", errors="replace")
 
-        # 主播放列表（只有 #EXT-X-STREAM-INF + 变体 URL）无法直接播放，跳过
+        # 基址用重定向后的最终地址（302 换域名时相对分片按旧地址解析会 404）
+        final_url = str(resp.url)
+        base = urljoin(final_url, ".")
+        origin = _origin(final_url)
+        proxy._referer = origin
+
+        # 主播放列表（只有 #EXT-X-STREAM-INF + 变体）无法直接播放 → 跟进第一个变体
+        if "#EXT-X-STREAM-INF" in text and "#EXTINF" not in text:
+            variant = next(
+                (line.strip() for line in text.splitlines()
+                 if line.strip() and not line.strip().startswith("#")),
+                None,
+            )
+            if variant and depth < 3:
+                log.info("主播放列表，跟进变体: %s", variant)
+                await session.close()
+                return await setup_hls_proxy(urljoin(base, variant), depth + 1)
+            return await abort("主播放列表无可用变体，跳过代理")
+
         if "#EXTINF" not in text:
-            log.warning("m3u8 无 #EXTINF（可能是主播放列表），跳过代理")
-            return None
+            return await abort("m3u8 无 #EXTINF（也不是主播放列表），跳过代理")
 
-        # m3u8 的基地址：用于把相对 URI（分片/密钥/初始化段）解析成绝对 URL
-        base = urljoin(m3u8_url, ".")
+        if "#EXT-X-ENDLIST" not in text:
+            return await abort("直播流（无 #EXT-X-ENDLIST），不代理，交由 mpv 原生播放")
+
+        if "METHOD=SAMPLE-AES" in text:
+            log.warning("检测到 SAMPLE-AES（DRM）加密，mpv 无法解密")
 
         # 先收集分片，探测第一个分片的真实内容：
         # 图片（漫画/图文番）→ 图像流模式（转 MJPEG/AVI，否则 ffmpeg 播不了）
@@ -522,22 +810,32 @@ async def setup_hls_proxy(m3u8_url: str) -> Optional[HlsProxy]:
             if line.strip() and not line.strip().startswith("#")
         ]
         if not raw_segments:
-            log.warning("m3u8 无分片可重写")
-            return None
+            return await abort("m3u8 无分片可重写")
 
         image_mode = False
         hybrid_mode = False
         try:
-            probe = await _probe_first_bytes(raw_segments[0], size=64 * 1024)
-            kind = _detect_image(probe)
-            ts_off = _find_ts_offset(probe)
-            if kind and ts_off is not None:
-                hybrid_mode = True
-                log.info("检测到混合分片（%s 封面 + TS 视频，TS 起点 %d），"
-                         "启用封面剥离模式", kind, ts_off)
-            elif kind:
-                image_mode = True
-                log.info("检测到图像流（%s 分片），启用图片→MJPEG/AVI 转换模式", kind)
+            probe_resp = await proxy._get(
+                raw_segments[0],
+                headers={"Range": "bytes=0-65535"},
+                retries=1,
+                timeout=_TIMEOUT,
+            )
+            if probe_resp is not None and probe_resp.status in (200, 206):
+                probe = await probe_resp.read()
+                probe_resp.close()
+                kind = _detect_image(probe)
+                ts_off = _find_ts_offset(probe)
+                if kind and ts_off is not None:
+                    hybrid_mode = True
+                    log.info("检测到混合分片（%s 封面 + TS 视频，TS 起点 %d），"
+                             "启用封面剥离模式", kind, ts_off)
+                elif kind:
+                    image_mode = True
+                    log.info("检测到图像流（%s 分片），启用图片→MJPEG/AVI 转换模式",
+                             kind)
+            elif probe_resp is not None:
+                probe_resp.close()
         except Exception as e:  # noqa: BLE001
             log.debug("分片类型探测失败（按视频流处理）: %s", e)
 
@@ -577,7 +875,8 @@ async def setup_hls_proxy(m3u8_url: str) -> Optional[HlsProxy]:
                 rewritten.append(f"{{BASE}}/seg/{len(segments) - 1}{seg_ext}")
 
         await proxy.start(segments, "\n".join(rewritten), keys, maps,
-                          mode="hybrid" if hybrid_mode else "image" if image_mode else "video")
+                          mode="hybrid" if hybrid_mode else "image" if image_mode else "video",
+                          referer=origin)
         # 用实际端口替换占位符
         proxy._playlist = proxy._playlist.replace("{BASE}", f"http://127.0.0.1:{proxy.port}")
         # 混合流：同步预热前 5 个分片——hls demuxer 打开分片 0 后会立即
@@ -593,6 +892,58 @@ async def setup_hls_proxy(m3u8_url: str) -> Optional[HlsProxy]:
         return proxy
     except Exception as e:  # noqa: BLE001
         log.warning("HLS 代理初始化失败: %s", e)
+        try:
+            await proxy.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
+async def setup_direct_proxy(url: str) -> Optional[DirectProxy]:
+    """非 HLS 直链的本地代理（防盗链头 + 重试 + 内容模式探测）。
+
+    返回已启动的 DirectProxy（playlist_url 交给 mpv），失败返回 None。
+    """
+    proxy = DirectProxy()
+    proxy._session = aiohttp.ClientSession()
+    try:
+        proxy._referer = _origin(url)
+        probe_resp = await proxy._get(
+            url,
+            headers={"Range": "bytes=0-65535"},
+            retries=1,
+            timeout=_TIMEOUT,
+        )
+        if probe_resp is None:
+            log.warning("直链探测失败（网络错误）: %s", url)
+            return None
+        if probe_resp.status not in (200, 206):
+            log.warning("直链探测失败: HTTP %s (%s)", probe_resp.status, url)
+            return None
+        probe = await probe_resp.read()
+        probe_resp.close()
+
+        # 实际是 m3u8 播放列表（URL 不带 .m3u8 后缀的情况）→ 转 HLS 代理
+        if probe.startswith(b"#EXTM3U"):
+            log.info("直链实为 m3u8 播放列表，转 HLS 代理")
+            await proxy.stop()
+            return await setup_hls_proxy(url)
+
+        kind = _detect_image(probe)
+        off = _find_ts_offset(probe)
+        if kind and off is not None:
+            proxy._mode = "hybrid"
+            log.info("直链检测为混合内容（%s 封面 + TS），启用封面剥离", kind)
+        elif kind:
+            proxy._mode = "image"
+            log.info("直链检测为图片，启用图片→AVI 转换")
+        else:
+            proxy._mode = "video"
+        await proxy.start(url)
+        log.info("直链代理就绪: %s（%s 模式）", proxy.playlist_url, proxy._mode)
+        return proxy
+    except Exception as e:  # noqa: BLE001
+        log.warning("直链代理初始化失败: %s", e)
         try:
             await proxy.stop()
         except Exception:  # noqa: BLE001

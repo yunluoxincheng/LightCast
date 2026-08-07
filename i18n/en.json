@@ -88,5 +88,10 @@
   "settings.audio_device.hint": "Choose which device plays the sound (refreshes when devices change)",
   "settings.audio_device.default": "Default (auto)",
   "player.error.play_failed": "Failed to play this media",
-  "player.error.play_failed.hint": "Check your network connection, or try another quality/source. Details are in the log (lightcast.log)."
+  "player.error.play_failed.hint": "Check your network connection, or try another quality/source. Details are in the log (lightcast.log).",
+  "player.error.hint.forbidden": "The source rejected the request (403/410) — the link may be expired or blocked by hotlink protection. Please re-cast.",
+  "player.error.hint.not_found": "The source reported the resource is missing (404) — the link may have expired. Please re-cast.",
+  "player.error.hint.key": "Failed to fetch the decryption key — it may be blocked by the source. Try another quality or source.",
+  "player.error.hint.invalid": "The media content could not be recognized — the source may have returned an error page. Try another quality or source.",
+  "player.error.hint.network": "Network connection failed or timed out. Check your network and retry."
 }

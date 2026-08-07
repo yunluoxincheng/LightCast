@@ -48,6 +48,28 @@ if TYPE_CHECKING:
 
 log = get_logger("ui.player")
 
+# 播放失败技术细节 → 友好原因映射（按关键词，顺序敏感：403 优先于通用网络）
+_HINT_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("403", "410", "forbidden"), "player.error.hint.forbidden"),
+    (("404", "not found"), "player.error.hint.not_found"),
+    (("decrypt", "cipher", "aes-128", "16 bytes", "key uri", "key file"),
+     "player.error.hint.key"),
+    (("invalid data", "failed to recognize", "could not find codec",
+      "unknown format", "unrecognized"), "player.error.hint.invalid"),
+    (("timed out", "timeout", "connection"), "player.error.hint.network"),
+)
+
+
+def _friendly_hint(detail: str) -> str:
+    """把 mpv 错误细节映射成可读原因；不匹配返回空串。"""
+    if not detail:
+        return ""
+    d = detail.lower()
+    for needles, key in _HINT_RULES:
+        if any(n in d for n in needles):
+            return tr(key)
+    return ""
+
 
 class PlayerInterface(QWidget):
     """播放器页面（内嵌渲染区 + 悬浮控制栏）。"""
@@ -314,10 +336,15 @@ class PlayerInterface(QWidget):
             self.controlBar.hide()
 
     def _on_playback_failed(self, title: str, detail: str) -> None:
-        """播放/加载失败 → 顶部信息条 + InfoBar 友好提示（技术细节见日志）。"""
+        """播放/加载失败 → 顶部信息条 + InfoBar 友好提示（技术细节见日志）。
+
+        优先把 mpv 技术错误映射成可读原因（403 防盗链/404 链接失效/密钥
+        拦截/内容异常/网络超时），匹配不到再退回通用提示。
+        """
         name = title or tr("player.error.play_failed")
         self.titleLabel.setText(name)
-        content = tr("player.error.play_failed.hint")
+        hint = _friendly_hint(detail) or tr("player.error.play_failed.hint")
+        content = hint
         if detail:
             content = f"{content}\n{detail}"
         InfoBar.error(
