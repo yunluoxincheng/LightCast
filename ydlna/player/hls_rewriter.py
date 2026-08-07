@@ -130,11 +130,18 @@ class HlsProxy:
     # ------------------------------------------------------------------ #
     # 上游请求（转发客户端 header，防止防盗链）
     # ------------------------------------------------------------------ #
-    async def _open_upstream(self, url: str, request: web.Request) -> Optional[aiohttp.ClientResponse]:
+    async def _open_upstream(
+        self,
+        url: str,
+        request: web.Request,
+        *,
+        strip_range: bool = False,
+    ) -> Optional[aiohttp.ClientResponse]:
         assert self._session is not None
         try:
             headers = {k: v for k, v in request.headers.items()
-                       if k.lower() not in ("host", "connection", "accept-encoding")}
+                       if k.lower() not in ("host", "connection", "accept-encoding")
+                       and not (strip_range and k.lower() in ("range", "if-range"))}
             return await self._session.get(url, headers=headers)
         except Exception as e:  # noqa: BLE001
             log.warning("代理上游 %s 失败: %s", url, e)
@@ -195,16 +202,21 @@ class HlsProxy:
         return stream
 
     async def _handle_key(self, request: web.Request) -> web.Response:
-        """转发 AES-128 密钥（内存缓存——ffmpeg 每个分片都会请求一次密钥）。"""
+        """转发 AES-128 密钥（内存缓存——ffmpeg 每个分片都会请求一次密钥）。
+
+        ffmpeg 的 HLS demuxer 请求密钥时会带 Range 头，上游会因此返回
+        206 部分内容；密钥只有 16 字节，这里忽略 Range 总是取完整内容，
+        再以 200 返回。
+        """
         index = int(request.match_info["index"])
         if index >= len(self._keys):
             return web.Response(status=404, text="key not found")
         url = self._keys[index]
         if url not in self._key_cache:
-            resp = await self._open_upstream(url, request)
+            resp = await self._open_upstream(url, request, strip_range=True)
             if resp is None:
                 return web.Response(status=502, text="proxy error")
-            if resp.status != 200:
+            if resp.status not in (200, 206):
                 log.warning("密钥 %s 上游返回 HTTP %s", url, resp.status)
                 return web.Response(status=resp.status, text="upstream error")
             self._key_cache[url] = await resp.read()
