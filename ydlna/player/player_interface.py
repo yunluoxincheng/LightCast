@@ -163,8 +163,8 @@ class PlayerInterface(QWidget):
         else:
             self._hide_empty()
         self._position_overlays()
-        if self._player.get_state() == "playing":
-            self._hide_timer.start()
+        # 非全屏常驻显示控制栏；全屏且播放中才启动自动隐藏
+        self._show_controls()
         # 让页面获得焦点以接收键盘快捷键
         self.setFocus()
 
@@ -189,11 +189,32 @@ class PlayerInterface(QWidget):
         if not self.controlBar.isVisible():
             self.controlBar.show()
             self.controlBar.update_position()
-        self._hide_timer.start()
+        # 非全屏时控制栏常驻（不启动隐藏计时）；全屏时才自动隐藏
+        if self._is_fullscreen():
+            self._hide_timer.start()
 
     def _hide_controls(self) -> None:
-        if self._player.get_state() == "playing":
+        # 仅全屏时自动隐藏
+        if self._is_fullscreen() and self._player.get_state() == "playing":
             self.controlBar.hide()
+
+    def _is_fullscreen(self) -> bool:
+        win = self.window()
+        return win is not None and win.isFullScreen()
+
+    def on_fullscreen_changed(self, is_fullscreen: bool) -> None:
+        """全屏状态变化时同步控制栏（由 MainWindow 调用）。
+
+        进全屏：启动自动隐藏计时；退全屏：常驻显示并停止计时。
+        """
+        if is_fullscreen:
+            if self._player.get_state() == "playing":
+                self._hide_timer.start()
+            else:
+                self._show_controls()
+        else:
+            self._hide_timer.stop()
+            self._show_controls()
 
     def _show_empty(self) -> None:
         self.emptyWidget.show()

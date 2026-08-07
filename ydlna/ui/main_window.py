@@ -107,6 +107,7 @@ class MainWindow(MSFluentWindow):
                 self.titleBar.show()
             # 恢复播放器页 header（标题栏）
             self.playerInterface.header.show()
+            self.playerInterface.on_fullscreen_changed(False)
         else:
             # 先切到播放器页
             self.switch_to_player()
@@ -116,6 +117,7 @@ class MainWindow(MSFluentWindow):
             # 隐藏播放器页 header（避免全屏时露出标题/按钮）
             self.playerInterface.header.hide()
             self.showFullScreen()
+            self.playerInterface.on_fullscreen_changed(True)
         self.playerInterface._position_overlays()
 
     def refresh_device_info(self, name: str, ip: str) -> None:
