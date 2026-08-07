@@ -103,11 +103,11 @@ class PlayerWindow(QWidget):
         self.mpvWidget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.mpvWidget, 1)
 
-        # 底部控制栏（黑底，与 mpv 不重叠）
+        # 底部控制栏（纯黑不透明，与 mpv 不重叠；避免半透明与原生窗口合成异常）
         self.controlBar = QWidget(self)
         self.controlBar.setObjectName("controlBar")
         self.controlBar.setStyleSheet(
-            "#controlBar { background: rgba(20, 20, 20, 0.95); }"
+            "#controlBar { background: #141414; }"
             "QLabel { color: #e0e0e0; }"
         )
         bar_layout = QHBoxLayout(self.controlBar)

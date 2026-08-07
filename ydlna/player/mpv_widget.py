@@ -30,9 +30,10 @@ class MpvWidget(QWidget):
         # 让本 widget 成为原生窗口，winId() 才会返回有效 HWND
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
-        # 黑底用 stylesheet（与已验证可渲染的最小测试一致）
+        # 黑底用 stylesheet（与已验证可渲染的最小测试完全一致）
         self.setStyleSheet("background: black;")
-        # 不设 WA_OpaquePaintEvent / autoFillBackground / setMinimumSize
+        # 注意：除了上面三个设置，不加任何其它属性（setMinimumSize /
+        # setSizePolicy / WA_OpaquePaintEvent 等）——它们都可能破坏渲染。
 
     def attach_player(self) -> bool:
         """显式把 mpv attach 到本 widget 的窗口句柄。可重复调用安全。"""

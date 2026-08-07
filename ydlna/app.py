@@ -13,7 +13,7 @@ import asyncio
 import sys
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from qfluentwidgets import Theme, setTheme, setThemeColor
 
 from .config import Config
@@ -97,11 +97,15 @@ async def run() -> int:
     signals = _AppSignals()
 
     # ---- 连接 ----
-    # DLNA 投屏到达 → 显示独立播放窗口（不切主窗口页面，避免导航/z-order 问题）
+    # DLNA 投屏到达 → 显示独立播放窗口并确保在最前
     def on_cast(title: str, url: str) -> None:
         log.info("投屏到达: %s", url)
         player_window.show()
         player_window.raise_()
+        player_window.activateWindow()
+        # 主窗口（frameless）有特殊置顶行为，可能盖住播放窗；
+        # 投屏时隐藏主窗口，只显示播放窗（用户可点托盘图标唤回主窗口）
+        window.hide()
         signals.castReceived.emit(title, url)
 
     # player 的 mediaChanged 同时通知投屏到达
@@ -148,7 +152,6 @@ async def run() -> int:
     # 注意：attach 后保持窗口可见（不 hide）——Windows 上原生 HWND 被 hide 后
     # mpv 的 GPU 渲染会挂起，导致投屏后画面不出来。attach 完成后用户可手动
     # 关闭窗口（仅隐藏），下次投屏到达会重新 show。
-    from PySide6.QtCore import QTimer
 
     def _ensure_mpv_ready():
         # 先 show 拿到 HWND（必须真正显示过 winId 才有效）
