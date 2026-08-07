@@ -94,12 +94,12 @@ class PlayerInterface(QWidget):
         self.emptyWidget.hide()
 
         # 独立浮层控制栏（悬浮，不占布局；归属主窗口，不置顶）
-        self.controlBar = ControlBar(self._player)
-        # 页面加入主窗口后，把控制栏归属到主窗口（Qt.Tool + parent 随主窗口
-        # 最小化/隐藏，且不会覆盖其它应用）
+        # 关键：parent 必须在构造时传入——Qt.Tool | FramelessWindowHint 在构造时
+        # 指定才保持"顶层工具窗口"身份；若先建后 setParent()，setParent 会剥离
+        # Window 标志把它降级成普通子控件，几何会被父窗口裁剪（窗口模式下控制栏
+        # 落在窗口下边缘之外 → 不可见，曾踩过这个坑）
         top = self.window()
-        if top is not self:
-            self.controlBar.setParent(top)
+        self.controlBar = ControlBar(self._player, top if top is not self else None)
         self.controlBar.attach_to(self)
         self.controlBar.fullscreenRequested.connect(self._on_fullscreen_requested)
         self.mpvWidget.mouseActivity.connect(self._show_controls)
