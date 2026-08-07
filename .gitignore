@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# YDLNA 运行时产物
+bin/libmpv-2.dll
+bin/mpv-2.dll
+bin/mpv-1.dll
+config.json
+ydlna.log
+ydlna.log.*
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*~
+.zcode/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# 临时下载
+.download/

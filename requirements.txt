@@ -1,0 +1,12 @@
+# YDLNA 核心依赖
+PySide6>=6.6,<6.12
+PySide6-Fluent-Widgets>=1.5
+qasync>=0.27
+python-mpv>=1.0.5
+async-upnp-client>=0.40
+
+# DLNA 元数据解析（async-upnp-client 依赖会自动装，这里显式声明）
+python-didl-lite>=1.4
+
+# 本机网卡枚举（纯 Python，无需 C 编译；用于 SSDP 多网卡多播）
+ifaddr>=0.2
