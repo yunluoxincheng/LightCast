@@ -59,12 +59,12 @@ class MainWindow(MSFluentWindow):
         )
 
         self.setWindowTitle(APP_DISPLAY_NAME)
-        # 默认 16:9 窗口；旧版本保存的是接近正方形的几何，
-        # 升级后首次启动用新默认替换一次（之后恢复记忆用户调整的几何）
-        self.resize(1280, 720)
+        # 默认 16:9 窗口（1152×648）；版本号升级时用新默认替换一次旧几何，
+        # 之后恢复记忆用户手动调整的尺寸/位置
+        self.resize(1152, 648)
         self.setMinimumSize(900, 600)
-        if not config.get("window_geometry_v2", False):
-            config.set("window_geometry_v2", True)
+        if not config.get("window_geometry_v3", False):
+            config.set("window_geometry_v3", True)
         else:
             geom = config.get("window_geometry")
             if isinstance(geom, list) and len(geom) == 4:
