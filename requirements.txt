@@ -10,3 +10,9 @@ python-didl-lite>=1.4
 
 # 本机网卡枚举（纯 Python，无需 C 编译；用于 SSDP 多网卡多播）
 ifaddr>=0.2
+
+# 流媒体代理层（HLS 重写 / 直链代理）
+aiohttp>=3.9
+
+# 图像流（漫画/图文番分片）转 JPEG
+Pillow>=10

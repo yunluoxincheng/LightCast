@@ -63,3 +63,5 @@ python main.py
 ## 许可证
 
 GPLv3（代码基于 PySide6-Fluent-Widgets 社区版；libmpv 为 GPLv2+）。架构参考 [Macast](https://github.com/xfangfang/Macast)。
+
+> 贡献者 / 开发者请阅读 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)（架构、踩坑记录与打包发布流程）。

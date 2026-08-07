@@ -1,0 +1,123 @@
+name: Build & Release
+
+# 触发方式：
+#   1. 推送 v* 标签（如 v0.1.0）→ 构建并发布 GitHub Release
+#      （安装版 + 便携版两个产物）
+#   2. 手动触发（workflow_dispatch）→ 只构建，产物挂在本条 run 的
+#      Artifacts 里（方便发布前试包）
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write # 允许创建 Release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      # 版本号：tag v1.2.3 → 1.2.3；手动触发用默认 0.1.0
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $ver = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.1.0' }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # libmpv-2.dll（约 110MB，不纳入仓库）：从 SourceForge 的 libmpv 目录
+      # 拉 RSS 取最新一个 dev 构建包，解压出 dll 放到 bin/
+      # 注意：优先标准版（非 v3），v3 精简版不含独立 dll
+      - name: Download libmpv-2.dll
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          $xml = [xml](curl.exe -sL 'https://sourceforge.net/projects/mpv-player-windows/rss?path=/libmpv')
+          $items = $xml.SelectNodes('//rss/channel/item')
+          $chosen = $null
+          foreach ($it in $items) {
+            $title = $it.SelectSingleNode('title').InnerText
+            if ($title -like '*.7z') {
+              if ($title -notlike '*v3*') { $chosen = $it; break }
+              if (-not $chosen) { $chosen = $it }
+            }
+          }
+          if (-not $chosen) { throw 'SourceForge libmpv 目录未找到 .7z 包' }
+          $title = $chosen.SelectSingleNode('title').InnerText
+          $url = $chosen.SelectSingleNode('link').InnerText
+          Write-Host "下载: $title"
+          curl.exe -sL $url -o libmpv.7z
+          if (-not (Test-Path 'libmpv.7z')) { throw 'libmpv.7z 下载失败' }
+          & 'C:\Program Files\7-Zip\7z.exe' e libmpv.7z "-obin" libmpv-2.dll -y
+          if (-not (Test-Path 'bin\libmpv-2.dll')) { throw '解压后未找到 libmpv-2.dll' }
+
+      # 让「关于」页的版本号与 Release 标签一致
+      - name: Sync app version
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          $path = 'ydlna\__init__.py'
+          $content = Get-Content $path -Raw
+          $content = $content -replace '__version__ = ".*?"', "__version__ = `"$ver`""
+          Set-Content -Path $path -Value $content -NoNewline
+
+      - name: Build exe (PyInstaller)
+        run: pyinstaller LightCast.spec --noconfirm
+
+      - name: Verify artifact
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'dist\LightCast\LightCast.exe')) {
+            throw '构建产物缺失: dist\LightCast\LightCast.exe'
+          }
+
+      - name: Pack portable zip
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          Compress-Archive -Path 'dist\LightCast' -DestinationPath "LightCast-Portable-$ver.zip" -Force
+          Write-Host "便携版: LightCast-Portable-$ver.zip"
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' "/DMyAppVersion=${{ steps.ver.outputs.version }}" 'packaging\installer.iss'
+          Get-ChildItem 'dist\LightCast-Setup-*.exe' | Select-Object -ExpandProperty Name
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          gh release create "$env:GITHUB_REF_NAME" `
+            "dist\LightCast-Setup-$ver.exe" `
+            "LightCast-Portable-$ver.zip" `
+            --title "轻投 LightCast v$ver" `
+            --generate-notes
+
+      # 手动触发：不建 Release，产物挂到 run 的 Artifacts 供下载
+      - name: Upload artifacts (manual run)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: LightCast-${{ steps.ver.outputs.version }}
+          path: |
+            dist/LightCast-Setup-*.exe
+            LightCast-Portable-*.zip
+          if-no-files-found: error

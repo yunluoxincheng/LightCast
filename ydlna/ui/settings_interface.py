@@ -31,7 +31,8 @@ if TYPE_CHECKING:
 
 log = get_logger("ui.settings")
 
-GITHUB_URL = "https://github.com/xfangfang/Macast"  # 参考实现；按需替换为项目主页
+# TODO: 仓库发布后替换为实际项目主页地址
+GITHUB_URL = "https://github.com/yourname/LightCast"
 
 
 class _SettingCard(CardWidget):

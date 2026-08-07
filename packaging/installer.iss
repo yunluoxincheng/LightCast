@@ -6,12 +6,17 @@
 ;      （ISCC 在 Inno Setup 安装目录下，https://jrsoftware.org/isinfo.php）
 ;   3. 产物: dist\LightCast-Setup-0.1.0.exe
 ;
+; 版本号可在命令行覆盖（GitHub Actions 发布时用）：
+;   ISCC.exe /DMyAppVersion=1.2.0 packaging\installer.iss
+;
 ; 注意：安装版把 PyInstaller 的 onedir 整个拷入安装目录，
 ; 配置/日志由应用自身写入 %APPDATA%\LightCast，不在安装目录内。
 
 #define MyAppName "轻投"
 #define MyAppNameEn "LightCast"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.0"
+#endif
 #define MyAppExeName "LightCast.exe"
 
 [Setup]
