@@ -82,6 +82,36 @@ def parse_title_from_didl(meta_xml: str) -> str:
     return ""
 
 
+def parse_class_from_didl(meta_xml: str) -> str:
+    """从 DIDL-Lite 元数据提取 upnp:class（媒体类型）。
+
+    返回如 "object.item.imageItem" / "object.item.videoItem" / ""。
+    """
+    if not meta_xml:
+        return ""
+    try:
+        root = ET.fromstring(meta_xml)
+    except ET.ParseError:
+        return ""
+    ns = {"upnp": "urn:schemas-upnp-org:metadata-1-0/upnp/"}
+    el = root.find(".//upnp:class", ns)
+    if el is not None and el.text:
+        return el.text.strip()
+    return ""
+
+
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".avif")
+
+# 常见图片 URL 特征（无扩展名时兜底）
+_IMAGE_CT = ("image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp")
+
+
+def url_is_image(url: str) -> bool:
+    """判断 URL 是否指向图片。"""
+    path = url.split("?", 1)[0].lower()
+    return path.endswith(_IMAGE_EXTS)
+
+
 class RendererBridge:
     """DLNA 协议层 ↔ 播放器层的桥接器。
 

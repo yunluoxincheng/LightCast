@@ -123,6 +123,10 @@ class Player:
             osd_level=0,
             cursor_autohide=False,
             terminal=False,
+            # 把 mpv 内部日志接到我们的日志体系（关键诊断基础设施：
+            # 没有它，媒体解码失败时看不到任何错误，只能盲猜）
+            log_handler=self._mpv_log_handler,
+            loglevel="info",
         )
         self._register_callbacks()
         # 应用初始音量/倍速
@@ -149,6 +153,24 @@ class Player:
     @property
     def available(self) -> bool:
         return self._attached and self._mpv is not None
+
+    # ------------------------------------------------------------------ #
+    # mpv 日志接入
+    # ------------------------------------------------------------------ #
+    def _mpv_log_handler(self, loglevel: str, component: str, message: str) -> None:
+        """把 mpv 内部日志映射到我们的 logger。
+
+        在 mpv 事件线程触发，只做日志，不碰 Qt。
+        """
+        try:
+            if loglevel == "error" or loglevel == "fatal":
+                log.error("[mpv/%s] %s", component, message.strip())
+            elif loglevel == "warn":
+                log.warning("[mpv/%s] %s", component, message.strip())
+            else:
+                log.debug("[mpv/%s] %s", component, message.strip())
+        except Exception:  # noqa: BLE001  日志失败绝不能影响播放
+            pass
 
     # ------------------------------------------------------------------ #
     # 回调注册（mpv 事件线程 → Qt 信号）
