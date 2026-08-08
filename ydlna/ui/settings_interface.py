@@ -115,8 +115,32 @@ class SettingsInterface(QWidget):
 
         # ---- 自动更新 ----
         self.updateCard = _SettingCard(tr("settings.update"), tr("settings.update.hint"))
+        update_widget = QWidget()
+        update_lay = QVBoxLayout(update_widget)
+        update_lay.setContentsMargins(0, 0, 0, 0)
+        update_lay.setSpacing(4)
+
+        # 第一行：自动检查更新开关（语义即卡片标题，行内不重复文案）
         self.updateSwitch = SwitchButton()
-        self.updateCard.setWidget(self.updateSwitch)
+        row1 = QWidget()
+        lay1 = QHBoxLayout(row1)
+        lay1.setContentsMargins(0, 0, 0, 0)
+        lay1.addWidget(self.updateSwitch)
+        lay1.addStretch(1)
+        # 第二行：加速镜像开关（直连与镜像并行探测取最快）
+        self.mirrorSwitch = SwitchButton()
+        self.mirrorLabel = BodyLabel(tr("settings.update.mirror"))
+        row2 = QWidget()
+        lay2 = QHBoxLayout(row2)
+        lay2.setContentsMargins(0, 0, 0, 0)
+        lay2.setSpacing(8)
+        lay2.addWidget(self.mirrorLabel)
+        lay2.addWidget(self.mirrorSwitch)
+        lay2.addStretch(1)
+
+        update_lay.addWidget(row1)
+        update_lay.addWidget(row2)
+        self.updateCard.setWidget(update_widget)
 
         # ---- 投屏服务 ----
         self.serviceTitle = SubtitleLabel(tr("settings.group.service"))
@@ -195,6 +219,7 @@ class SettingsInterface(QWidget):
         self.bootAutostartSwitch.setChecked(is_enabled())
         self._reload_audio_devices()
         self.updateSwitch.setChecked(bool(self._config.get("auto_update", True)))
+        self.mirrorSwitch.setChecked(bool(self._config.get("update_mirror", True)))
         self.autostartSwitch.setChecked(bool(self._config.get("dlna_enabled", True)))
         self.deviceNameEdit.setText(self._config.get("friendly_name", ""))
         self.portEdit.setText(str(self._config.get("http_port", 0)))
@@ -219,6 +244,7 @@ class SettingsInterface(QWidget):
         self.bootAutostartSwitch.checkedChanged.connect(self._on_boot_autostart_changed)
         self.audioDeviceCombo.currentIndexChanged.connect(self._on_audio_device_changed)
         self.updateSwitch.checkedChanged.connect(self._on_update_switch_changed)
+        self.mirrorSwitch.checkedChanged.connect(self._on_mirror_switch_changed)
         self.checkUpdateButton.clicked.connect(self._on_check_update_clicked)
         self.autostartSwitch.checkedChanged.connect(self._on_autostart_changed)
         self.deviceNameEdit.textChanged.connect(self._on_device_name_changed)
@@ -267,6 +293,9 @@ class SettingsInterface(QWidget):
     def _on_update_switch_changed(self, checked: bool) -> None:
         self._config.set("auto_update", checked)
 
+    def _on_mirror_switch_changed(self, checked: bool) -> None:
+        self._config.set("update_mirror", checked)
+
     def _on_check_update_clicked(self) -> None:
         """手动检查更新（异步，非阻塞；结果用 InfoBar / 更新流程提示）。"""
         import asyncio
@@ -304,7 +333,10 @@ class SettingsInterface(QWidget):
                         position=InfoBarPosition.TOP,
                     )
                 else:
-                    await run_update_flow(self.window(), info)
+                    await run_update_flow(
+                        self.window(), info,
+                        use_mirror=bool(self._config.get("update_mirror", True)),
+                    )
             finally:
                 btn.setEnabled(True)
                 btn.setText(tr("settings.check_update"))
@@ -345,6 +377,7 @@ class SettingsInterface(QWidget):
         self.audioDeviceCard.descLabel.setText(tr("settings.audio_device.hint"))
         self.updateCard.titleLabel.setText(tr("settings.update"))
         self.updateCard.descLabel.setText(tr("settings.update.hint"))
+        self.mirrorLabel.setText(tr("settings.update.mirror"))
         self.checkUpdateButton.setText(tr("settings.check_update"))
         self._reload_audio_devices()  # 默认项文案随语言变化，整体重填
         self.serviceTitle.setText(tr("settings.group.service"))

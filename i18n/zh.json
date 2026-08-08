@@ -91,6 +91,7 @@
   "settings.audio_device.default": "默认（自动）",
   "settings.update": "自动检查更新",
   "settings.update.hint": "每次启动时检查 GitHub 是否有新版本，发现后自动下载并提示安装（需联网）",
+  "settings.update.mirror": "使用加速镜像下载（直连与镜像并行探测，自动选最快）",
   "settings.check_update": "检查更新",
   "settings.check_update.checking": "正在检查…",
   "settings.check_update.up_to_date": "已是最新版本",

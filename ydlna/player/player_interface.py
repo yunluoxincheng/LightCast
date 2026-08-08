@@ -170,6 +170,12 @@ class PlayerInterface(QWidget):
         self.mpvWidget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         root.addWidget(self.mpvWidget, 1)
 
+        # 嵌入式控制栏（非全屏使用）：在布局内随窗口自然移动缩放，
+        # 彻底消除悬浮窗口跟随抖动；媒体门控（投屏前不显示）
+        self.embeddedBar = ControlBar(self._player, self, floating=False)
+        root.addWidget(self.embeddedBar)
+        self.embeddedBar.hide()
+
         # 空状态覆盖层（悬浮在渲染区之上，投屏后隐藏）
         self.emptyWidget = self._build_empty(self)
         self.emptyWidget.setGeometry(0, 0, 1, 1)  # 初始小几何，由 resizeEvent 校正
@@ -183,20 +189,22 @@ class PlayerInterface(QWidget):
         # 挡住 paused-for-cache 观察器注册时的初始 False 异步回调（时序不定）
         self._buffering_override = False
 
-        # 独立浮层控制栏（悬浮，不占布局；归属主窗口，不置顶）
+        # 悬浮控制栏（全屏使用）：独立顶层窗口 + 锚定跟随
         # 关键：parent 必须在构造时传入——Qt.Tool | FramelessWindowHint 在构造时
         # 指定才保持"顶层工具窗口"身份；若先建后 setParent()，setParent 会剥离
-        # Window 标志把它降级成普通子控件，几何会被父窗口裁剪（窗口模式下控制栏
-        # 落在窗口下边缘之外 → 不可见，曾踩过这个坑）
+        # Window 标志把它降级成普通子控件，几何会被父窗口裁剪（曾踩过这个坑）
         top = self.window()
-        self.controlBar = ControlBar(self._player, top if top is not self else None)
-        self.controlBar.attach_to(self)
-        self.controlBar.fullscreenRequested.connect(self._on_fullscreen_requested)
+        self.floatingBar = ControlBar(
+            self._player, top if top is not self else None, floating=True
+        )
+        self.floatingBar.attach_to(self)
+        for bar in (self.embeddedBar, self.floatingBar):
+            bar.fullscreenRequested.connect(self._on_fullscreen_requested)
+            bar.activity.connect(self._show_controls)
         self.mpvWidget.mouseActivity.connect(self._show_controls)
         self.mpvWidget.mouseDoubleClicked.connect(self._on_fullscreen_requested)
         # 单击画面 = 播放/暂停（双击全屏不受影响）
         self.mpvWidget.singleClicked.connect(self._player.play_pause)
-        self.controlBar.activity.connect(self._show_controls)
 
         # 自动隐藏定时器
         self._hide_timer = QTimer(self)
@@ -253,7 +261,9 @@ class PlayerInterface(QWidget):
         super().hideEvent(event)
         # 关键：切到其它导航页时强制隐藏原生窗口，防止 z-order 刺穿残留
         self.mpvWidget.hide()
-        self.controlBar.hide()
+        self.floatingBar.hide()
+        self.embeddedBar.hide()
+        self._set_cursor_visible(True)
 
     def _on_page_shown(self) -> None:
         # 页面隐藏时直接返回：showEvent 的延迟回调可能在切回其它页后才执行
@@ -296,10 +306,10 @@ class PlayerInterface(QWidget):
             r.y() + (r.height() - h) // 2,
             w, h,
         )
-        self.controlBar.update_position()
+        self.floatingBar.update_position()
 
     # ------------------------------------------------------------------ #
-    # 控制栏显示/隐藏
+    # 控制栏显示/隐藏（双 bar 状态机 + 全屏光标隐藏）
     # ------------------------------------------------------------------ #
     def _has_media(self) -> bool:
         """是否已有可播放的媒体（成功投屏后才有）。"""
@@ -308,26 +318,53 @@ class PlayerInterface(QWidget):
             or self._player.get_state() in ("playing", "paused")
         )
 
+    def _sync_control_bars(self) -> None:
+        """按当前模式（全屏/窗口）+ 媒体门控统一显隐两个控制栏（单一入口）。"""
+        fs = self._is_fullscreen()
+        media = self._has_media()
+        if fs:
+            self.embeddedBar.hide()
+            if media:
+                if not self.floatingBar.isVisible():
+                    self.floatingBar.show()
+                    self.floatingBar.update_position()
+            else:
+                self.floatingBar.hide()
+        else:
+            self.floatingBar.hide()
+            if media:
+                if not self.embeddedBar.isVisible():
+                    self.embeddedBar.show()
+            else:
+                self.embeddedBar.hide()
+
+    def _set_cursor_visible(self, visible: bool) -> None:
+        """全屏时隐藏鼠标（mpvWidget 继承页面光标）。"""
+        if visible:
+            self.unsetCursor()
+        else:
+            self.setCursor(Qt.BlankCursor)
+
     def _show_controls(self) -> None:
         # 页面不可见（切到其它页的残留调用）或无媒体（尚未投屏）时不显示
         if not self.isVisible() or not self._has_media():
             return
-        if not self.controlBar.isVisible():
-            self.controlBar.show()
-            self.controlBar.update_position()
+        self._sync_control_bars()
+        self._set_cursor_visible(True)
         # 非全屏时控制栏常驻（不启动隐藏计时）；全屏时才自动隐藏
         if self._is_fullscreen():
             self._hide_timer.start()
 
     def _hide_controls(self) -> None:
-        # 仅全屏时自动隐藏
+        # 仅全屏时自动隐藏：隐藏悬浮条 + 隐藏鼠标（动一下即恢复）
         if self._is_fullscreen() and self._player.get_state() == "playing":
-            self.controlBar.hide()
+            self.floatingBar.hide()
+            self._set_cursor_visible(False)
 
     def _reanchor(self) -> None:
-        """周期跟随：页面可见且控制栏可见时刷新其位置。"""
-        if self.isVisible() and self.controlBar.isVisible():
-            self.controlBar.update_position()
+        """周期跟随：页面可见且悬浮条可见时刷新其位置。"""
+        if self.isVisible() and self.floatingBar.isVisible():
+            self.floatingBar.update_position()
 
     def _is_fullscreen(self) -> bool:
         win = self.window()
@@ -336,15 +373,15 @@ class PlayerInterface(QWidget):
     def on_fullscreen_changed(self, is_fullscreen: bool) -> None:
         """全屏状态变化时同步控制栏（由 MainWindow 调用）。
 
-        进全屏：启动自动隐藏计时；退全屏：常驻显示并停止计时。
+        进全屏：_show_controls 完成「嵌入式条 → 悬浮条」切换并启动隐藏计时；
+        退全屏：停止计时、恢复鼠标、切回嵌入式条。
         """
         if is_fullscreen:
-            if self._player.get_state() == "playing":
-                self._hide_timer.start()
-            else:
-                self._show_controls()
+            # 内部会同步双 bar 并在全屏时启动自动隐藏计时
+            self._show_controls()
         else:
             self._hide_timer.stop()
+            self._set_cursor_visible(True)
             self._show_controls()
 
     def _show_empty(self) -> None:
@@ -444,7 +481,8 @@ class PlayerInterface(QWidget):
             self._show_empty()
             self.hide_buffering()
             # 没有媒体了 → 控制栏也隐藏
-            self.controlBar.hide()
+            self.embeddedBar.hide()
+            self.floatingBar.hide()
 
     def _on_playback_failed(self, title: str, detail: str) -> None:
         """播放/加载失败 → 顶部信息条 + InfoBar 友好提示（技术细节见日志）。

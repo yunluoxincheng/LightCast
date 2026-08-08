@@ -37,12 +37,10 @@ LightCast/
     │   ├── hls_rewriter.py     # 流媒体代理层（HLS 重写 + 直链代理）
     │   ├── player_interface.py # 播放器页面（渲染区 + 缓冲动画 + 空状态）
     │   ├── control_bar.py      # 悬浮控制栏（独立顶层窗口，媒体门控）
-    │   └── player_window.py    # 独立播放窗口（可选）
     └── ui/                     # UI 层
         ├── main_window.py      # MSFluentWindow 框架（16:9 默认窗口、全屏、托盘提示）
         ├── home_interface.py   # 主页（状态 / 设备信息 / 投屏引导）
         ├── settings_interface.py # 设置页（滚动区域布局）
-        ├── media_controls.py   # Fluent 风格播放控制条
         ├── tray.py             # 系统托盘
         └── widgets.py          # 状态指示灯等小组件
 ```

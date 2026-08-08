@@ -14,6 +14,7 @@ import asyncio
 import html as _html
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -30,8 +31,20 @@ GITHUB_URL = "https://github.com/yunluoxincheng/LightCast"
 # GitHub API：最新 Release
 RELEASES_API = GITHUB_URL.replace("github.com/", "api.github.com/repos/") + "/releases/latest"
 
+# GitHub Release 加速镜像（前缀式拼接在官方 URL 前）。
+# 可用性随时间变化：每次下载前并行探测、选最快的源，失败的自动跳过；
+# 直连永远在候选列表第一位。实测（2026-08，CN 网络）：直连 ~28KB/s，
+# ghfast.top ~64KB/s。
+_MIRRORS = (
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
+    "https://ghproxy.net/",
+)
+
 _UA = f"LightCast/{__version__}"
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
+_PROBE_TIMEOUT = aiohttp.ClientTimeout(total=8)
+_PROBE_SIZE = 256 * 1024
 
 
 @dataclass
@@ -142,17 +155,51 @@ def download_dir() -> Path:
     return d
 
 
+async def _probe_source(url: str) -> Optional[float]:
+    """探测单个源：Range 拉 256KB 计时。返回耗时秒数；失败返回 None。"""
+    t0 = time.monotonic()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"Range": f"bytes=0-{_PROBE_SIZE - 1}"},
+                timeout=_PROBE_TIMEOUT,
+            ) as resp:
+                if resp.status in (200, 206):
+                    await resp.read()
+                    return time.monotonic() - t0
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+async def rank_sources(url: str, use_mirror: bool = True) -> list[str]:
+    """并行探测直连与镜像，返回按探测速度排序的源（快的在前，失败的最后）。"""
+    candidates = [url]
+    if use_mirror:
+        candidates += [m + url for m in _MIRRORS]
+    times = await asyncio.gather(*[_probe_source(u) for u in candidates])
+    pairs = list(zip(candidates, times))
+    ranked = [u for u, t in sorted(
+        (p for p in pairs if p[1] is not None), key=lambda p: p[1]
+    )]
+    ranked += [u for u, t in pairs if t is None]  # 失败的排在最后（仍可兜底）
+    return ranked
+
+
 async def download_update(
     url: str,
     dest: Path,
     on_progress: Optional[Callable[[int, int], None]] = None,
     workers: int = 8,
+    use_mirror: bool = True,
 ) -> Path:
-    """下载更新包（IDM 式多线程加速）。
+    """下载更新包（IDM 式多线程 + 智能选源）。
 
-    - 默认 8 个并发连接，动态分块（小任务队列 + os.pwrite 定位写）：
-      快的连接自动多干活，慢的连接少干——比固定等分更能吃满带宽
-      （借鉴 IDM 的思路：连接数多 + 快慢均衡 + 连接复用）
+    - 智能选源：并行探测直连 + 加速镜像（各拉 256KB 计时），选最快的源；
+      下载中途失败自动换下一个候选源
+    - 默认 8 个并发连接，动态分块（小任务队列 + 定位写）：
+      快的连接自动多干活——比固定等分更能吃满带宽
     - 服务器不支持 Range / 大小未知 / 文件很小（<2MB）时自动回退
       单线程流式下载
     - 分块写盘，不阻塞事件循环；on_progress(done, total) 在主线程协程内回调
@@ -160,6 +207,31 @@ async def download_update(
     dest = Path(dest)
     timeout = aiohttp.ClientTimeout(total=None, connect=15)
 
+    order = await rank_sources(url, use_mirror)
+    if order and order[0] != url:
+        log.info("智能选源: %s（直连探测较慢或失败）", order[0])
+    last_err: Optional[Exception] = None
+    for source in order:
+        try:
+            return await _download_from_source(
+                source, dest, on_progress, workers, timeout
+            )
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            log.warning("源 %s 下载失败: %s，换下一个", source, e)
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("无可用下载源")
+
+
+async def _download_from_source(
+    url: str,
+    dest: Path,
+    on_progress: Optional[Callable[[int, int], None]],
+    workers: int,
+    timeout: aiohttp.ClientTimeout,
+) -> Path:
+    """从单个源下载（探测 total → 小文件/无 Range 单线程，否则多线程动态分块）。"""
     # 探测：Range 支持 + 总大小（GET bytes=0-0，206 + Content-Range）
     total = 0
     ranges_ok = False
@@ -262,7 +334,7 @@ async def _await_signal(signal, timeout: float = 0) -> None:
         await fut
 
 
-async def run_update_flow(parent, info: UpdateInfo) -> bool:
+async def run_update_flow(parent, info: UpdateInfo, *, use_mirror: bool = True) -> bool:
     """完整更新流程：提示 → 下载（带进度）→ 安装提示 → 启动安装程序。
 
     返回 True 表示已启动安装程序（应用即将退出）；False 表示用户取消或失败。
@@ -305,7 +377,7 @@ async def run_update_flow(parent, info: UpdateInfo) -> bool:
 
     dest = download_dir() / f"LightCast-Setup-{info.version}.exe"
     try:
-        await download_update(info.setup_url, dest, _progress)
+        await download_update(info.setup_url, dest, _progress, use_mirror=use_mirror)
     except Exception as e:  # noqa: BLE001
         dlg.close()
         dlg.deleteLater()

@@ -5,14 +5,14 @@
 
 鼠标事件
 --------
-本 widget 是原生窗口，鼠标事件不会冒泡给父级（PlayerWindow），因此这里
+本 widget 是原生窗口，鼠标事件不会冒泡给父级，因此这里
 显式把鼠标活动通过 ``mouseActivity`` 信号转发出去（用于唤起控制栏）。
 需要 ``setMouseTracking(True)`` 才能收到未按下的移动事件。
 """
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from ..logger import get_logger
 from .mpv_player import Player
@@ -41,11 +41,13 @@ class MpvWidget(QWidget):
         self.setStyleSheet("background: black;")
         # 接收未按下的鼠标移动事件（用于唤起控制栏）
         self.setMouseTracking(True)
-        # 单击判定：300ms 内没有跟来双击（mouseDoubleClickEvent 会取消）
-        # 才算单击——否则双击全屏会先误触发一次播放/暂停
+        # 单击判定：双击判定窗口（doubleClickInterval，默认 400ms）内
+        # 没有跟来双击（mouseDoubleClickEvent 会取消）才算单击。
+        # 定时器必须比双击窗口长——否则慢速双击（间隔 300~400ms）会先
+        # 触发单击暂停、再触发双击全屏（用户反馈的误触）
         self._single_click_timer = QTimer(self)
         self._single_click_timer.setSingleShot(True)
-        self._single_click_timer.setInterval(300)
+        self._single_click_timer.setInterval(QApplication.doubleClickInterval() + 60)
         self._single_click_timer.timeout.connect(self.singleClicked.emit)
 
     # ------------------------------------------------------------------ #

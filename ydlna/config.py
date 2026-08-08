@@ -33,6 +33,8 @@ DEFAULTS: dict[str, Any] = {
     "audio_device": "",
     # 启动时自动检查 GitHub Release 更新
     "auto_update": True,
+    # 更新下载使用加速镜像（智能选源：直连与镜像并行探测取最快）
+    "update_mirror": True,
     # 窗口几何（x, y, w, h），None 表示用系统默认
     "window_geometry": None,
     # 窗口默认尺寸版本标记（每次调整默认尺寸时 +1，首次启动重置一次旧几何）

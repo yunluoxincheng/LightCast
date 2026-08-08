@@ -213,7 +213,10 @@ async def run() -> int:
                 log.info("发现新版本 v%s", info.version)
                 # 静默托盘模式下提示框不能挂在隐藏窗口上
                 parent = window if window.isVisible() else None
-                await run_update_flow(parent, info)
+                await run_update_flow(
+                    parent, info,
+                    use_mirror=bool(config.get("update_mirror", True)),
+                )
 
         asyncio.create_task(_do())
 

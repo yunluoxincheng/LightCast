@@ -38,6 +38,25 @@ _SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
 BAR_HEIGHT = 52
 
 
+class _SeekSlider(Slider):
+    """点击轨道直接定位的进度条。
+
+    Qt 的 QSlider 默认点击轨道只移动一个 pageStep，不能跳到点击处；
+    这里在按下时按 x 坐标换算目标值，并走一遍 pressed→released 的
+    现有 seek 链路（点击后仍可按住继续拖动）。
+    """
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802, ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            ratio = max(0.0, min(1.0, event.position().x() / max(1, self.width())))
+            value = round(self.minimum() + (self.maximum() - self.minimum()) * ratio)
+            self.setValue(value)
+            # 点击 = 一次完整的按下+释放，复用现有 seek 逻辑
+            self.sliderPressed.emit()
+            self.sliderReleased.emit()
+        super().mousePressEvent(event)
+
+
 def _fmt_time(seconds: float | None) -> str:
     if seconds is None or seconds < 0:
         return "0:00"
@@ -48,24 +67,32 @@ def _fmt_time(seconds: float | None) -> str:
 
 
 class ControlBar(QWidget):
-    """独立浮层控制栏。"""
+    """播放控制栏，双形态：
+
+    - ``floating=True``（默认）：独立顶层工具窗口（Qt.Tool | Frameless），
+      悬浮在锚点底部——全屏时使用（不参与布局、可自动隐藏）
+    - ``floating=False``：普通子控件，位置由页面布局管理——非全屏时使用
+      （随窗口自然移动缩放，无悬浮窗口跟随抖动）
+    """
 
     # 用户在控制栏上的活动（用于重置自动隐藏计时）
     activity = Signal()
 
-    def __init__(self, player: Player, parent: QWidget | None = None) -> None:
-        # 嵌入模式：控制栏归属主窗口（parent），不置顶——
-        # - Qt.Tool + parent：随主窗口最小化/隐藏，且不会覆盖其它应用
-        # - 不加 WindowStaysOnTopHint（那是独立窗口时代为避免被主窗口盖住加的，
-        #   嵌入后会让控制栏盖过所有应用）
-        # - FramelessWindowHint：无边框
-        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
+    def __init__(self, player: Player, parent: QWidget | None = None,
+                 *, floating: bool = True) -> None:
+        self._floating = floating
+        if floating:
+            # 独立顶层工具窗口：不抢焦点、随主窗口最小化/隐藏、不覆盖其它应用。
+            # 关键：flags 必须在构造时传入，setParent 会剥离 Window 标志
+            super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
+            self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        else:
+            # 嵌入式：普通子控件（位置交给布局）
+            super().__init__(parent)
         self._player = player
         self._anchor: QWidget | None = None
         self._dragging_slider = False
 
-        # 不抢焦点（保持播放窗口接收键盘）
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setFixedHeight(BAR_HEIGHT)
         self.setStyleSheet(
             "QWidget { background: rgba(16, 16, 16, 0.88); }"
@@ -96,11 +123,11 @@ class ControlBar(QWidget):
             b.setFixedSize(30, 30)
         self.playButton.setFixedSize(36, 36)
 
-        # 时间 + 进度条 + 时长
+        # 时间 + 进度条 + 时长（点击轨道可直接定位）
         self.timeLabel = BodyLabel("0:00")
         self.timeLabel.setMinimumWidth(38)
         self.timeLabel.setAlignment(Qt.AlignCenter)
-        self.positionSlider = Slider(Qt.Horizontal, self)
+        self.positionSlider = _SeekSlider(Qt.Horizontal, self)
         self.positionSlider.setRange(0, 1000)
         self.positionSlider.setValue(0)
         self.durationLabel = BodyLabel("0:00")
@@ -168,7 +195,7 @@ class ControlBar(QWidget):
         s.volumeChanged.connect(self._on_volume)
         s.muteChanged.connect(self._on_mute)
 
-    # 全屏请求信号由外部（PlayerWindow）连接
+    # 全屏请求信号由宿主（PlayerInterface）连接
     def _request_fullscreen(self) -> None:
         self.activity.emit()
         # 用 QMetaObject 间接触发外部连接
@@ -184,12 +211,13 @@ class ControlBar(QWidget):
         self._anchor = anchor
 
     def update_position(self) -> None:
-        """按锚点 widget 的屏幕位置刷新自己的几何。
+        """按锚点 widget 的屏幕位置刷新自己的几何（仅悬浮形态）。
 
-        锚点可以是独立窗口（PlayerWindow）或导航页里的页面（PlayerInterface）：
-        - 窗口：frameGeometry 有屏幕坐标
-        - 页面：mapToGlobal 换算到屏幕坐标（考虑主窗口位置）
+        锚点是播放器页面（PlayerInterface）：mapToGlobal 换算到屏幕坐标
+        （考虑主窗口位置）。
         """
+        if not self._floating:
+            return  # 嵌入式形态由布局管理，无需锚定
         if self._anchor is None or not self.isVisible():
             return
         a = self._anchor
