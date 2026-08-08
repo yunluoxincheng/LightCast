@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -93,6 +95,46 @@ async def check_for_update() -> Optional[UpdateInfo]:
     )
 
 
+def _md_to_html(text: str) -> str:
+    """把更新说明（markdown 子集：## / ### 标题、- 列表）转成 HTML。
+
+    发布说明来自 CHANGELOG.md 的小节，格式固定，做轻量转换即可，
+    交给 QMessageBox 富文本渲染。
+    """
+    out: list[str] = []
+    in_list = False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            continue
+        if s.startswith("### "):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f"<h4>{_html.escape(s[4:])}</h4>")
+        elif s.startswith("## "):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f"<h3>{_html.escape(s[3:])}</h3>")
+        elif s.startswith("- "):
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append(f"<li>{_html.escape(s[2:])}</li>")
+        else:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f"<p>{_html.escape(s)}</p>")
+    if in_list:
+        out.append("</ul>")
+    return "".join(out)
+
+
 def download_dir() -> Path:
     """更新包下载目录（APPDATA/LightCast/updates）。"""
     from .constants import CONFIG_PATH
@@ -105,24 +147,92 @@ async def download_update(
     url: str,
     dest: Path,
     on_progress: Optional[Callable[[int, int], None]] = None,
+    parts: int = 4,
 ) -> Path:
-    """流式下载（分块写盘，不阻塞事件循环）。
+    """下载更新包。
 
-    on_progress(done, total) 在主线程协程内回调，可直接更新 UI。
+    - 默认 4 段 Range 并发下载（多线程效果，速度显著提升）；
+      服务器不支持 Range / 大小未知时自动回退单线程流式下载
+    - 分块写盘，不阻塞事件循环；on_progress(done, total) 在主线程协程内回调
     """
     timeout = aiohttp.ClientTimeout(total=None, connect=15)
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=timeout) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"下载失败: HTTP {resp.status}")
-            total = int(resp.headers.get("Content-Length") or 0)
-            done = 0
-            with open(dest, "wb") as f:
-                async for chunk in resp.content.iter_chunked(256 * 1024):
-                    f.write(chunk)
-                    done += len(chunk)
-                    if on_progress:
-                        on_progress(done, total)
+
+    # 探测：Range 支持 + 总大小（GET bytes=0-0，206 + Content-Range）
+    total = 0
+    ranges_ok = False
+    async with aiohttp.ClientSession() as probe_session:
+        async with probe_session.get(
+            url, headers={"Range": "bytes=0-0"}, timeout=timeout
+        ) as probe:
+            if probe.status == 206:
+                m = re.search(r"/\s*(\d+)\s*$", probe.headers.get("Content-Range", ""))
+                if m:
+                    total = int(m.group(1))
+                    ranges_ok = True
+    if not ranges_ok:
+        # 单线程流式（原有逻辑）
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=timeout) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"下载失败: HTTP {resp.status}")
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                with open(dest, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(256 * 1024):
+                        f.write(chunk)
+                        done += len(chunk)
+                        if on_progress:
+                            on_progress(done, total)
+        return dest
+
+    # 分段并发
+    n = max(1, min(parts, total // (256 * 1024)))  # 每段至少 256KB，避免段过碎
+    if n <= 1:
+        n = 1
+    ranges = []
+    step = total // n
+    for i in range(n):
+        start = i * step
+        end = total - 1 if i == n - 1 else (i + 1) * step - 1
+        ranges.append((start, end))
+    done = [0] * n
+    part_paths = [Path(str(dest) + f".part{i}") for i in range(n)]
+
+    async def fetch(i: int, start: int, end: int) -> None:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"Range": f"bytes={start}-{end}"},
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 206:
+                    raise RuntimeError(f"分段 {i} 下载失败: HTTP {resp.status}")
+                with open(part_paths[i], "wb") as f:
+                    async for chunk in resp.content.iter_chunked(256 * 1024):
+                        f.write(chunk)
+                        done[i] += len(chunk)
+                        if on_progress:
+                            on_progress(sum(done), total)
+
+    try:
+        await asyncio.gather(*(fetch(i, s, e) for i, (s, e) in enumerate(ranges)))
+    except Exception:
+        # 失败清理半成品
+        for p in part_paths:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    # 按序拼接
+    with open(dest, "wb") as out:
+        for p in part_paths:
+            with open(p, "rb") as f:
+                shutil.copyfileobj(f, out, 1024 * 1024)
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
     return dest
 
 
@@ -150,12 +260,14 @@ async def run_update_flow(parent, info: UpdateInfo) -> bool:
 
     from .i18n import tr
 
-    # 1. 发现新版本提示（非阻塞）
+    # 1. 发现新版本提示（非阻塞；说明按 markdown 渲染成富文本）
+    from PySide6.QtCore import Qt
     box = QMessageBox(parent)
     box.setWindowTitle(tr("dialog.update.available.title"))
+    box.setTextFormat(Qt.TextFormat.RichText)
     box.setText(tr("dialog.update.available.body").format(version=info.version))
     if info.notes:
-        box.setInformativeText(info.notes[:600])
+        box.setInformativeText(_md_to_html(info.notes))
     dl_btn = box.addButton(tr("dialog.update.download"), QMessageBox.ButtonRole.AcceptRole)
     box.addButton(tr("dialog.update.later"), QMessageBox.ButtonRole.RejectRole)
     box.setDefaultButton(dl_btn)

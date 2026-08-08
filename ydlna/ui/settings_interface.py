@@ -167,6 +167,7 @@ class SettingsInterface(QWidget):
         root.addWidget(self.themeCard)
         root.addWidget(self.bootAutostartCard)
         root.addWidget(self.audioDeviceCard)
+        root.addWidget(self.updateCard)
         root.addSpacing(8)
         root.addWidget(self.serviceTitle)
         root.addWidget(self.autostartCard)
