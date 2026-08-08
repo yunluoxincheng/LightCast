@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QWidget
 
 from ..logger import get_logger
@@ -25,6 +25,8 @@ class MpvWidget(QWidget):
 
     # 鼠标在渲染区活动（移动/点击/双击）——用于唤起控制栏
     mouseActivity = Signal()
+    # 单击（双击判定窗口内无双击）——用于播放/暂停
+    singleClicked = Signal()
     # 双击渲染区——用于切换全屏
     mouseDoubleClicked = Signal()
 
@@ -39,6 +41,12 @@ class MpvWidget(QWidget):
         self.setStyleSheet("background: black;")
         # 接收未按下的鼠标移动事件（用于唤起控制栏）
         self.setMouseTracking(True)
+        # 单击判定：300ms 内没有跟来双击（mouseDoubleClickEvent 会取消）
+        # 才算单击——否则双击全屏会先误触发一次播放/暂停
+        self._single_click_timer = QTimer(self)
+        self._single_click_timer.setSingleShot(True)
+        self._single_click_timer.setInterval(300)
+        self._single_click_timer.timeout.connect(self.singleClicked.emit)
 
     # ------------------------------------------------------------------ #
     def attach_player(self) -> bool:
@@ -69,7 +77,16 @@ class MpvWidget(QWidget):
         self.mouseActivity.emit()
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802, ANN001
+        """左键抬起：启动单击判定（双击到达时在 mouseDoubleClickEvent 取消）。"""
+        self.mouseActivity.emit()
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._single_click_timer.start()
+        super().mouseReleaseEvent(event)
+
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802, ANN001
+        # 取消待定的单击（避免双击全屏前先误触发一次播放/暂停）
+        self._single_click_timer.stop()
         self.mouseActivity.emit()
         self.mouseDoubleClicked.emit()
         super().mouseDoubleClickEvent(event)

@@ -194,6 +194,8 @@ class PlayerInterface(QWidget):
         self.controlBar.fullscreenRequested.connect(self._on_fullscreen_requested)
         self.mpvWidget.mouseActivity.connect(self._show_controls)
         self.mpvWidget.mouseDoubleClicked.connect(self._on_fullscreen_requested)
+        # 单击画面 = 播放/暂停（双击全屏不受影响）
+        self.mpvWidget.singleClicked.connect(self._player.play_pause)
         self.controlBar.activity.connect(self._show_controls)
 
         # 自动隐藏定时器

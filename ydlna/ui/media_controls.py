@@ -30,6 +30,25 @@ from ..player.mpv_player import Player
 log = get_logger("ui.controls")
 
 
+class _SeekSlider(Slider):
+    """点击轨道直接定位的进度条。
+
+    Qt 的 QSlider 默认点击轨道只移动一个 pageStep，不能跳到点击处；
+    这里在按下时按 x 坐标换算目标值，并走一遍 pressed→released 的
+    现有 seek 链路（点击后仍可按住继续拖动）。
+    """
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802, ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            ratio = max(0.0, min(1.0, event.position().x() / max(1, self.width())))
+            value = round(self.minimum() + (self.maximum() - self.minimum()) * ratio)
+            self.setValue(value)
+            # 点击 = 一次完整的按下+释放，复用现有 seek 逻辑
+            self.sliderPressed.emit()
+            self.sliderReleased.emit()
+        super().mousePressEvent(event)
+
+
 def _format_time(seconds: float | None) -> str:
     """把秒格式化为 H:MM:SS 或 M:SS。"""
     if seconds is None or seconds < 0:
@@ -84,7 +103,7 @@ class MediaControls(QFrame):
         self.timeLabel.setMinimumWidth(40)
         self.timeLabel.setAlignment(Qt.AlignCenter)
 
-        self.positionSlider = Slider(Qt.Horizontal, self)
+        self.positionSlider = _SeekSlider(Qt.Horizontal, self)
         self.positionSlider.setRange(0, 1000)  # 用 0..1000 提高精度
         self.positionSlider.setValue(0)
         self.positionSlider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
