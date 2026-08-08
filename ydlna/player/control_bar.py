@@ -84,7 +84,13 @@ class ControlBar(QWidget):
         if floating:
             # 独立顶层工具窗口：不抢焦点、随主窗口最小化/隐藏、不覆盖其它应用。
             # 关键：flags 必须在构造时传入，setParent 会剥离 Window 标志
-            super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
+            # WindowDoesNotAcceptFocus（WS_EX_NOACTIVATE）：点击悬浮栏不会
+            # 激活它、不会夺走主窗口激活——否则全屏切换时 DWM 帧因激活
+            # 变化闪白（用户反馈"点按钮切全屏才闪"）
+            super().__init__(
+                parent,
+                Qt.Tool | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus,
+            )
             self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         else:
             # 嵌入式：普通子控件（位置交给布局）
@@ -160,6 +166,17 @@ class ControlBar(QWidget):
         self.fullscreenButton = TransparentToolButton(FIF.FULL_SCREEN, self)
         self.fullscreenButton.setFixedSize(30, 30)
         self.fullscreenButton.setToolTip(tr("player.fullscreen"))
+
+        # 所有交互控件不抢焦点（NoFocus）：
+        # - 点击按钮/滑块不会把焦点从播放器页夺走（键盘快捷键由应用级
+        #   过滤器处理，不依赖焦点）
+        # - 全屏切换时被隐藏的控件不会触发"焦点逃逸 → 重绘/滚动"
+        for b in (self.prevButton, self.backwardButton, self.playButton,
+                  self.forwardButton, self.nextButton, self.muteButton,
+                  self.fullscreenButton):
+            b.setFocusPolicy(Qt.NoFocus)
+        for w in (self.speedCombo, self.volumeSlider, self.positionSlider):
+            w.setFocusPolicy(Qt.NoFocus)
 
         for w in (self.prevButton, self.backwardButton, self.playButton,
                   self.forwardButton, self.nextButton):
