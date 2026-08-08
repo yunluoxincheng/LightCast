@@ -41,6 +41,10 @@ DEFAULTS: dict[str, Any] = {
     "window_geometry_v6": False,
     # 是否已提示过「关闭即最小化到托盘」
     "minimize_hint_shown": False,
+    # 投屏 URL 是否允许指向内网私有地址（NAS 等）。
+    # 默认关：挡住「借投屏让本机访问内网/本机服务」的 SSRF。
+    # 需要给内网 NAS 投屏的用户可在设置中开启。
+    "allow_intranet_cast": False,
 }
 
 

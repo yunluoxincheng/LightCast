@@ -93,6 +93,8 @@
   "settings.update.hint": "每次启动时检查 GitHub 是否有新版本，发现后自动下载并提示安装（需联网）",
   "settings.update_mirror": "更新下载加速",
   "settings.update_mirror.hint": "直连与加速镜像并行探测、自动选最快的源下载（镜像为第三方代理）",
+  "settings.allow_intranet_cast": "允许内网投屏源",
+  "settings.allow_intranet_cast.hint": "默认拒绝指向内网地址的投屏以防 SSRF；需要给局域网 NAS 等内网设备投屏时可开启",
   "settings.check_update": "检查更新",
   "settings.check_update.checking": "正在检查…",
   "settings.check_update.up_to_date": "已是最新版本",
@@ -106,11 +108,17 @@
   "dialog.update.install": "立即安装",
   "dialog.update.later": "稍后",
   "dialog.update.failed": "下载更新失败",
+  "dialog.update.checksum_failed": "更新包校验失败",
+  "dialog.update.checksum_failed.body": "下载的安装包完整性校验未通过，可能已被篡改或下载损坏。已自动删除，请稍后重试或前往 GitHub 手动下载。",
+  "dialog.update.no_checksum": "此版本暂不支持自动更新",
+  "dialog.update.no_checksum.body": "该 Release 缺少完整性校验信息（SHA256SUMS.txt），为安全起见不会自动安装。请前往 GitHub Releases 手动下载最新版本。",
   "player.error.play_failed": "无法播放该媒体",
   "player.error.play_failed.hint": "请检查网络连接，或尝试其他清晰度/资源。详细原因见日志（lightcast.log）。",
   "player.error.hint.forbidden": "源站拒绝了请求（403/410），可能是链接已过期或防盗链拦截，请返回重新投屏",
   "player.error.hint.not_found": "源站提示资源不存在（404），链接可能已失效，请返回重新投屏",
   "player.error.hint.key": "解密密钥获取失败，可能被源站拦截，请尝试其他清晰度或资源",
   "player.error.hint.invalid": "媒体内容无法识别，源站可能返回了错误内容（如登录页），请尝试其他清晰度或资源",
-  "player.error.hint.network": "网络连接失败或超时，请检查网络后重试"
+  "player.error.hint.network": "网络连接失败或超时，请检查网络后重试",
+  "error.cast_url_blocked": "投屏地址被安全策略拦截",
+  "error.cast_url_blocked.hint": "该投屏地址指向本机或内网（可能为 SSRF 攻击）。如需投屏内网设备，请在「设置 → 投屏服务」中开启「允许内网投屏源」。"
 }

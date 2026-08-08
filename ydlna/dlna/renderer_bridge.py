@@ -129,6 +129,9 @@ class RendererBridge:
         # 投屏到达（SetAVTransportURI）回调：由 app 注入，用于立即切页 + 缓冲动画
         # （不等代理/解码，用户体感秒进播放器页）
         self.on_cast_started = None  # Callable[[], None] | None
+        # 当前活跃的媒体代理（换媒体时先停旧的）
+        self._hls_proxy = None
+        self._direct_proxy = None
         # 连接 player 状态变化，同步到 DLNA TransportState
         self._player.signals.stateChanged.connect(self._on_player_state)
 
@@ -156,9 +159,18 @@ class RendererBridge:
         - m3u8 → HLS 重写代理（分片改名 + 密钥/初始化段转发 + 内容兼容）
         - 直链 → DirectProxy（防盗链头 + 重试 + 内容模式兼容）
         代理初始化失败时回退直接播放原 URL。
+
+        非 http(s) scheme（file:// / edl:// / data: 等）一律拒绝，不传给 mpv，
+        防止局域网投屏方借 mpv 读取本地文件或触发危险协议。
         """
         title = parse_title_from_didl(meta) or url
         log.info("桥接: 设置媒体 title=%r url=%s", title, url)
+
+        # scheme 白名单（第一道关）：代理层还会对私网 IP 再做一次 SSRF 校验
+        if not url.lower().startswith(("http://", "https://")):
+            log.warning("拒绝非 http(s) 投屏 URL（可能尝试读取本地文件）: %s", url)
+            self._set_transport_state("ERROR_OCCURRED")
+            return
 
         # 先通知 UI「投屏到达」：立即切到播放器页并显示缓冲动画，
         # 代理/解码在后台进行（用户体感秒进）
@@ -169,14 +181,17 @@ class RendererBridge:
             except Exception as e:  # noqa: BLE001
                 log.debug("on_cast_started 回调异常: %s", e)
 
-        if url.lower().startswith(("http://", "https://")):
+        try:
             proxied = await self._setup_proxy(url)
             if proxied is not None:
                 log.info("播放代理后的 URL: %s", proxied)
                 self._player.play(proxied, title)
                 return
             log.warning("代理初始化失败，回退直接播放原 URL")
-        self._player.play(url, title)
+            self._player.play(url, title)
+        except Exception as e:  # noqa: BLE001  代理/播放失败：回滚状态，避免 UI 不一致
+            log.warning("设置媒体失败: %s", e)
+            self._set_transport_state("ERROR_OCCURRED")
 
     async def _setup_proxy(self, url: str) -> Optional[str]:
         """建立本地媒体代理，返回可播放 URL（失败返回 None）。

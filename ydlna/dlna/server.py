@@ -61,10 +61,13 @@ def _patch_upnp_server_skip_ssdp() -> None:
         self.base_uri = (
             f"http://[{real_ip}]:{port}" if is_ipv6 else f"http://{real_ip}:{port}"
         )
-        # device 实例已经用旧 base_uri 建了，也要刷新它持有的 base_uri
+        # device 实例是用旧 base_uri（0.0.0.0）建的，也要刷新它持有的 base_uri 与 host。
+        # 注意库 UpnpServerDevice 的属性是无下划线的 self.base_uri / self.host
+        # （async_upnp_client/server.py:418-419）；此前误写成 _base_uri 导致刷新失效。
         if self._device is not None:
             try:
-                self._device._base_uri = self.base_uri  # noqa: SLF001
+                self._device.base_uri = self.base_uri  # noqa: SLF001
+                self._device.host = real_ip  # noqa: SLF001
             except AttributeError:
                 pass
         log.debug("UpnpServer base_uri = %s", self.base_uri)

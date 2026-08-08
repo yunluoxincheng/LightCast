@@ -81,12 +81,22 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 from aiohttp import web
 
+from ..config import Config
 from ..logger import get_logger
+from ._url_guard import is_url_allowed
 
 log = get_logger("player.hls")
 
 # #EXT-X-KEY / #EXT-X-MAP 里的 URI="..." 属性
 _ATTR_URI_RE = re.compile(r'URI="([^"]*)"')
+
+# 小响应的硬读取上限（防恶意上游无限返回撑爆内存）
+_MAX_M3U8 = 1 * 1024 * 1024          # m3u8 播放列表：1MB 足够（极长番剧也就几十 KB）
+_MAX_KEY = 16                         # AES-128 密钥固定 16 字节
+_MAX_PROBE = 64 * 1024               # 分片类型探测：首 64KB
+
+# 图像流 JPEG 缓存上限（每张 ~100KB-1MB，16 张足够顺序播放滚动）
+_JPEG_CACHE_LIMIT = 16
 
 # 常见图片魔数（探测"图文流"用）
 _IMAGE_MAGICS: tuple[tuple[bytes, str], ...] = (
@@ -225,6 +235,32 @@ async def _read_capped(resp: aiohttp.ClientResponse, what: str,
         log.warning("%s读取中断: %s", what, e)
         return None
     return bytes(buf)
+
+
+def _allow_intranet() -> bool:
+    """读取「允许内网投屏源」配置（SSRF 防护开关，默认关）。"""
+    try:
+        return bool(Config.instance().get("allow_intranet_cast", False))
+    except Exception:  # noqa: BLE001  配置不可用时走最严格
+        return False
+
+
+def _set_pil_pixel_limit() -> None:
+    """限制 PIL 解码像素上限（防解压炸弹：小 PNG 解码成 GB 级位图）。
+
+    4096×4096×4 通道约 67M 像素，番剧 / 漫画分页绰绰有余。
+    幂等，多次调用安全。
+    """
+    try:
+        from PIL import Image
+
+        # PIL 默认 ~89M 像素，仅给 DecompressionBombWarning；这里收紧 + 改成抛错
+        Image.MAX_IMAGE_PIXELS = 4096 * 4096 * 4
+    except ImportError:
+        pass
+
+
+_set_pil_pixel_limit()
 
 
 class _BaseProxy:
@@ -409,6 +445,7 @@ class HlsProxy(_BaseProxy):
         self._mode: str = "video"  # "video" | "image" | "hybrid"
         self._jpeg_cache: dict[int, bytes] = {}
         self._jpeg_sizes: dict[int, tuple[int, int]] = {}
+        self._jpeg_cache_order: list[int] = []  # LRU 顺序（上限 _JPEG_CACHE_LIMIT）
         # hybrid 模式：PNG 封面 + TS 视频混合分片 → 剥前缀缓存
         self._ts_cache: dict[int, bytes] = {}
         self._ts_cache_order: list[int] = []
@@ -434,6 +471,7 @@ class HlsProxy(_BaseProxy):
         self._mode = mode
         self._jpeg_cache = {}
         self._jpeg_sizes = {}
+        self._jpeg_cache_order = []
         self._ts_cache = {}
         self._ts_cache_order = []
         self._referer = referer
@@ -491,7 +529,7 @@ class HlsProxy(_BaseProxy):
             if resp.status not in (200, 206):
                 log.warning("密钥 %s 上游返回 HTTP %s", url, resp.status)
                 return web.Response(status=resp.status, text="upstream error")
-            data = await resp.read()
+            data = await resp.content.read(_MAX_KEY)
             resp.close()
             if len(data) != 16:
                 log.warning("密钥长度异常 %d 字节（AES-128 应为 16），"
@@ -603,6 +641,7 @@ class HlsProxy(_BaseProxy):
                 log.warning("图片分片 %d 转换失败，回退原始转发", index)
                 return await self._forward_url(request, self._segments[index], "分片")
         jpeg = self._jpeg_cache[index]
+        self._trim_jpeg_cache(index)  # 命中即提升为最近使用
         w, h = self._jpeg_sizes[index]
         avi = _make_avi(jpeg, w, h)
         return web.Response(body=avi, content_type="video/x-msvideo")
@@ -634,12 +673,28 @@ class HlsProxy(_BaseProxy):
                 img = img.convert("RGB")
             buf = io.BytesIO()
             img.save(buf, "JPEG", quality=88)
+            img.close()
             self._jpeg_cache[index] = buf.getvalue()
+            self._trim_jpeg_cache(index)
+        except Image.DecompressionBombError as e:  # 解压炸弹（_set_pil_pixel_limit 触发）
+            log.warning("图片分片 %d 像素超限，疑似解压炸弹: %s", index, e)
+            return False
         except Exception as e:  # noqa: BLE001
             log.warning("图片分片 %d 转换失败: %s", index, e)
             return False
         log.debug("图片分片 %d 已转 JPEG (%d 字节)", index, len(self._jpeg_cache[index]))
         return True
+
+    def _trim_jpeg_cache(self, just_added: int) -> None:
+        """图像流 JPEG 缓存 LRU：保留最近 _JPEG_CACHE_LIMIT 张。"""
+        # 记录访问顺序（刚写入的放最后）
+        if just_added in self._jpeg_cache_order:
+            self._jpeg_cache_order.remove(just_added)
+        self._jpeg_cache_order.append(just_added)
+        while len(self._jpeg_cache) > _JPEG_CACHE_LIMIT and self._jpeg_cache_order:
+            oldest = self._jpeg_cache_order.pop(0)
+            self._jpeg_cache.pop(oldest, None)
+            self._jpeg_sizes.pop(oldest, None)
 
 
 class DirectProxy(_BaseProxy):
@@ -763,13 +818,17 @@ async def setup_hls_proxy(m3u8_url: str, depth: int = 0) -> Optional[HlsProxy]:
     try:
         # 防盗链 Referer 先从原始 URL 取（m3u8 本身也可能校验 Referer）
         proxy._referer = _origin(m3u8_url)
+        if not is_url_allowed(m3u8_url, allow_intranet=_allow_intranet()):
+            return await abort(f"m3u8 URL 被安全策略拦截（SSRF 防护）: {m3u8_url}")
         resp = await proxy._get(m3u8_url, retries=1, timeout=_TIMEOUT)
         if resp is None:
             return await abort(f"下载 m3u8 失败（网络错误）: {m3u8_url}")
         if resp.status != 200:
             return await abort(f"下载 m3u8 失败: HTTP {resp.status}")
-        body = await resp.read()
+        body = await _read_capped(resp, "m3u8 播放列表", cap=_MAX_M3U8)
         resp.close()
+        if body is None:
+            return await abort(f"m3u8 超过 {_MAX_M3U8 // 1024}KB，疑似异常: {m3u8_url}")
         if _looks_html(body):
             return await abort(f"m3u8 返回 HTML（疑似登录墙/防盗链页）: {m3u8_url}")
         text = body.decode("utf-8", errors="replace")
@@ -788,9 +847,12 @@ async def setup_hls_proxy(m3u8_url: str, depth: int = 0) -> Optional[HlsProxy]:
                 None,
             )
             if variant and depth < 3:
-                log.info("主播放列表，跟进变体: %s", variant)
+                variant_url = urljoin(base, variant)
+                if not is_url_allowed(variant_url, allow_intranet=_allow_intranet()):
+                    return await abort(f"变体 URL 被安全策略拦截（SSRF 防护）: {variant_url}")
+                log.info("主播放列表，跟进变体: %s", variant_url)
                 await session.close()
-                return await setup_hls_proxy(urljoin(base, variant), depth + 1)
+                return await setup_hls_proxy(variant_url, depth + 1)
             return await abort("主播放列表无可用变体，跳过代理")
 
         if "#EXTINF" not in text:
@@ -812,6 +874,13 @@ async def setup_hls_proxy(m3u8_url: str, depth: int = 0) -> Optional[HlsProxy]:
         if not raw_segments:
             return await abort("m3u8 无分片可重写")
 
+        # SSRF 防护：校验所有分片 / 密钥 / 初始化段 URL。被拦截的整段 m3u8 拒绝代理
+        # （单条 m3u8 混入内网地址基本就是恶意构造，不部分代理）。
+        intranet = _allow_intranet()
+        for seg in raw_segments:
+            if not is_url_allowed(seg, allow_intranet=intranet):
+                return await abort(f"分片 URL 被安全策略拦截（SSRF 防护）: {seg}")
+
         image_mode = False
         hybrid_mode = False
         try:
@@ -822,8 +891,10 @@ async def setup_hls_proxy(m3u8_url: str, depth: int = 0) -> Optional[HlsProxy]:
                 timeout=_TIMEOUT,
             )
             if probe_resp is not None and probe_resp.status in (200, 206):
-                probe = await probe_resp.read()
+                probe = await _read_capped(probe_resp, "分片探测", cap=_MAX_PROBE)
                 probe_resp.close()
+                if probe is None:
+                    probe = b""  # 探测超限按未知类型处理（走 video 模式）
                 kind = _detect_image(probe)
                 ts_off = _find_ts_offset(probe)
                 if kind and ts_off is not None:
@@ -859,6 +930,11 @@ async def setup_hls_proxy(m3u8_url: str, depth: int = 0) -> Optional[HlsProxy]:
                     m = _ATTR_URI_RE.search(s)
                     if m:
                         full = urljoin(base, m.group(1))
+                        if not is_url_allowed(full, allow_intranet=intranet):
+                            return await abort(
+                                f"{'密钥' if s.startswith('#EXT-X-KEY') else '初始化段'}"
+                                f" URL 被安全策略拦截（SSRF 防护）: {full}"
+                            )
                         if s.startswith("#EXT-X-KEY"):
                             idx = len(keys)
                             keys.append(full)
@@ -908,6 +984,9 @@ async def setup_direct_proxy(url: str) -> Optional[DirectProxy]:
     proxy._session = aiohttp.ClientSession()
     try:
         proxy._referer = _origin(url)
+        if not is_url_allowed(url, allow_intranet=_allow_intranet()):
+            log.warning("直链 URL 被安全策略拦截（SSRF 防护）: %s", url)
+            return None
         probe_resp = await proxy._get(
             url,
             headers={"Range": "bytes=0-65535"},
@@ -920,8 +999,11 @@ async def setup_direct_proxy(url: str) -> Optional[DirectProxy]:
         if probe_resp.status not in (200, 206):
             log.warning("直链探测失败: HTTP %s (%s)", probe_resp.status, url)
             return None
-        probe = await probe_resp.read()
+        probe = await _read_capped(probe_resp, "直链探测", cap=_MAX_PROBE)
         probe_resp.close()
+        if probe is None:
+            log.warning("直链探测超过 %dKB，疑似异常: %s", _MAX_PROBE // 1024, url)
+            return None
 
         # 实际是 m3u8 播放列表（URL 不带 .m3u8 后缀的情况）→ 转 HLS 代理
         if probe.startswith(b"#EXTM3U"):

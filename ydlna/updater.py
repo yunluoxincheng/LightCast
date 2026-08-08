@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html as _html
 import os
 import re
@@ -57,6 +58,9 @@ class UpdateInfo:
     setup_url: str        # 安装版（Windows .exe）
     portable_url: str     # 便携版 zip
     published_at: str
+    # SHA256SUMS.txt 的直链（来自 GitHub API，HTTPS）。
+    # 为空表示该 Release 未附带校验信息 → 出于安全考虑拒绝自动安装。
+    sums_url: str = ""
 
 
 def parse_version(text: str) -> tuple[int, int, int]:
@@ -95,6 +99,8 @@ async def check_for_update() -> Optional[UpdateInfo]:
     }
     setup_url = next((u for n, u in assets.items() if n.endswith(".exe")), "")
     portable_url = next((u for n, u in assets.items() if n.endswith(".zip")), "")
+    # SHA256SUMS.txt（完整性校验锚点，只从 GitHub 取，不经镜像）
+    sums_url = next((u for n, u in assets.items() if n.upper() == "SHA256SUMS.TXT"), "")
     if not setup_url:
         raise RuntimeError("最新 Release 没有安装包资产")
     return UpdateInfo(
@@ -104,6 +110,7 @@ async def check_for_update() -> Optional[UpdateInfo]:
         setup_url=setup_url,
         portable_url=portable_url,
         published_at=data.get("published_at", "") or "",
+        sums_url=sums_url,
     )
 
 
@@ -153,6 +160,63 @@ def download_dir() -> Path:
     d = Path(CONFIG_PATH).parent / "updates"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# --------------------------------------------------------------------------- #
+# 完整性校验（SHA-256）—— 防止镜像/中间人篡改安装包
+# --------------------------------------------------------------------------- #
+# 校验锚点：校验和只从 GitHub 官方（直连 HTTPS）取，绝不经加速镜像。
+# 下载本身可走镜像提速，但落地后必须用此校验和验证，不通过则拒绝安装。
+class ChecksumError(RuntimeError):
+    """更新包完整性校验失败或缺少校验信息。"""
+
+
+async def _fetch_sha256(sums_url: str, filename: str) -> Optional[str]:
+    """从 GitHub 直连下载 SHA256SUMS.txt，解析出指定文件名的哈希。
+
+    sums_url 是 GitHub Release asset 的 browser_download_url（HTTPS 直连 GitHub）。
+    返回 64 位小写十六进制哈希，或 None（未找到对应条目）。
+    """
+    content = await _fetch_direct_text(sums_url)
+    if content is None:
+        return None
+    # SHA256SUMS 格式：每行 "<64位hex>  <filename>"（两个空格）
+    for line in content.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        digest, name = parts[0].strip(), parts[1].strip()
+        # 文件名可能带 ./ 前缀或路径，按 basename 比较
+        if Path(name).name == filename and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            return digest.lower()
+    return None
+
+
+async def _fetch_direct_text(url: str, *, cap: int = 16384) -> Optional[str]:
+    """直连（不经镜像）下载小文本响应，带大小上限。失败返回 None。"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, timeout=_TIMEOUT, headers={"User-Agent": _UA}
+            ) as resp:
+                if resp.status != 200:
+                    log.warning("直连取 %s 返回 HTTP %s", url, resp.status)
+                    return None
+                # 限制读取量，防恶意/异常响应撑爆内存
+                data = await resp.content.read(cap)
+                return data.decode("utf-8", errors="replace")
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+        log.warning("直连取 %s 失败: %s", url, e)
+        return None
+
+
+def _sha256_file(path: Path, chunk_size: int = 256 * 1024) -> str:
+    """流式计算文件 SHA-256，返回小写十六进制。"""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 async def _probe_source(url: str) -> Optional[float]:
@@ -388,7 +452,38 @@ async def run_update_flow(parent, info: UpdateInfo, *, use_mirror: bool = True) 
     def _progress(done: int, total: int) -> None:
         bar.setValue(int(done * 1000 / total) if total else 0)
 
-    dest = download_dir() / f"LightCast-Setup-{info.version}.exe"
+    # 完整性校验：下载前先从 GitHub 直连取 SHA-256。
+    # 没有 SHA256SUMS.txt（旧版本 Release）→ 拒绝自动更新，保守安全。
+    setup_filename = f"LightCast-Setup-{info.version}.exe"
+    if not info.sums_url:
+        dlg.close()
+        dlg.deleteLater()
+        log.warning("Release 缺少 SHA256SUMS.txt，拒绝自动更新: v%s", info.version)
+        InfoBar.warning(
+            title=tr("dialog.update.no_checksum"),
+            content=tr("dialog.update.no_checksum.body"),
+            orient=0,  # Qt.Horizontal
+            isClosable=True,
+            duration=10000,
+            parent=parent if parent is not None else None,
+            position=InfoBarPosition.TOP,
+        )
+        return False
+    expected_sha = await _fetch_sha256(info.sums_url, setup_filename)
+    if expected_sha is None:
+        dlg.close()
+        dlg.deleteLater()
+        log.warning("SHA256SUMS.txt 中未找到 %s 的校验和", setup_filename)
+        InfoBar.warning(
+            title=tr("dialog.update.no_checksum"),
+            content=tr("dialog.update.no_checksum.body"),
+            orient=0, isClosable=True, duration=10000,
+            parent=parent if parent is not None else None,
+            position=InfoBarPosition.TOP,
+        )
+        return False
+
+    dest = download_dir() / setup_filename
     task = asyncio.create_task(
         download_update(info.setup_url, dest, _progress, use_mirror=use_mirror)
     )
@@ -426,6 +521,40 @@ async def run_update_flow(parent, info: UpdateInfo, *, use_mirror: bool = True) 
         return False
     dlg.close()
     dlg.deleteLater()
+
+    # 完整性校验：下载后比对 SHA-256，不匹配 = 篡改/损坏 → 删除并拒绝安装。
+    # 这一步堵住「加速镜像中间人替换安装包」的供应链 RCE（见 CODE_REVIEW C1）。
+    try:
+        actual_sha = await asyncio.to_thread(_sha256_file, dest)
+    except OSError as e:
+        log.warning("计算下载文件 SHA-256 失败: %s", e)
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        InfoBar.error(
+            title=tr("dialog.update.failed"), content=str(e),
+            orient=0, isClosable=True, duration=8000,
+            parent=parent if parent is not None else None,
+            position=InfoBarPosition.TOP,
+        )
+        return False
+    if actual_sha != expected_sha:
+        log.error("校验和不匹配: 期望 %s 实际 %s（文件可能被篡改）",
+                  expected_sha, actual_sha)
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        InfoBar.error(
+            title=tr("dialog.update.checksum_failed"),
+            content=tr("dialog.update.checksum_failed.body"),
+            orient=0, isClosable=True, duration=10000,
+            parent=parent if parent is not None else None,
+            position=InfoBarPosition.TOP,
+        )
+        return False
+    log.info("更新包校验通过 (SHA-256 %s)", actual_sha)
 
     # 3. 安装提示
     size_mb = max(1, round(dest.stat().st_size / (1024 * 1024)))

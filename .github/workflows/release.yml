@@ -98,6 +98,27 @@ jobs:
           & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' "/DMyAppVersion=${{ steps.ver.outputs.version }}" 'packaging\installer.iss'
           Get-ChildItem 'dist\LightCast-Setup-*.exe' | Select-Object -ExpandProperty Name
 
+      # 生成 SHA256SUMS.txt：客户端自动更新只信任 GitHub 直连取的这个校验和，
+      # 下载（可经加速镜像）落地后强制比对，挡住镜像中间人替换安装包（CODE_REVIEW C1）
+      - name: Generate SHA256SUMS
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          $hashes = @()
+          $files = @(
+            "dist\LightCast-Setup-$ver.exe",
+            "LightCast-Portable-$ver.zip"
+          )
+          foreach ($f in $files) {
+            if (Test-Path $f) {
+              $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
+              $hashes += "$h  $([System.IO.Path]::GetFileName($f))"
+            }
+          }
+          $hashes | Out-File -FilePath 'SHA256SUMS.txt' -Encoding ascii
+          Write-Host '--- SHA256SUMS.txt ---'
+          Get-Content SHA256SUMS.txt
+
       # 从 CHANGELOG.md 提取当前版本小节作为 Release 说明（无对应小节时给占位文案）
       - name: Prepare release notes
         shell: pwsh
@@ -122,6 +143,7 @@ jobs:
           gh release create "$env:GITHUB_REF_NAME" `
             "dist\LightCast-Setup-$ver.exe" `
             "LightCast-Portable-$ver.zip" `
+            "SHA256SUMS.txt" `
             --title "轻投 LightCast v$ver" `
             --notes-file 'release_notes.md'
 
@@ -134,4 +156,5 @@ jobs:
           path: |
             dist/LightCast-Setup-*.exe
             LightCast-Portable-*.zip
+            SHA256SUMS.txt
           if-no-files-found: error

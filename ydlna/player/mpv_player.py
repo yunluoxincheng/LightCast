@@ -136,6 +136,8 @@ class Player:
             cursor_autohide=False,
             terminal=False,
             ytdl=False,                  # 禁用 youtube-dl 解析（本地 m3u8 不需要，且会报错干扰）
+            config=False,                # 不读 mpv.conf：投屏 URL 来自外部，防本地配置注入
+            load_scripts=False,          # 不加载脚本：减少攻击面（防御纵深）
             # 把 mpv 内部日志接到我们的日志体系（关键诊断基础设施：
             # 没有它，媒体解码失败时看不到任何错误，只能盲猜）
             log_handler=self._mpv_log_handler,
