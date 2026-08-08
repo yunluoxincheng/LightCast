@@ -115,32 +115,13 @@ class SettingsInterface(QWidget):
 
         # ---- 自动更新 ----
         self.updateCard = _SettingCard(tr("settings.update"), tr("settings.update.hint"))
-        update_widget = QWidget()
-        update_lay = QVBoxLayout(update_widget)
-        update_lay.setContentsMargins(0, 0, 0, 0)
-        update_lay.setSpacing(4)
-
-        # 第一行：自动检查更新开关（语义即卡片标题，行内不重复文案）
         self.updateSwitch = SwitchButton()
-        row1 = QWidget()
-        lay1 = QHBoxLayout(row1)
-        lay1.setContentsMargins(0, 0, 0, 0)
-        lay1.addWidget(self.updateSwitch)
-        lay1.addStretch(1)
-        # 第二行：加速镜像开关（直连与镜像并行探测取最快）
-        self.mirrorSwitch = SwitchButton()
-        self.mirrorLabel = BodyLabel(tr("settings.update.mirror"))
-        row2 = QWidget()
-        lay2 = QHBoxLayout(row2)
-        lay2.setContentsMargins(0, 0, 0, 0)
-        lay2.setSpacing(8)
-        lay2.addWidget(self.mirrorLabel)
-        lay2.addWidget(self.mirrorSwitch)
-        lay2.addStretch(1)
+        self.updateCard.setWidget(self.updateSwitch)
 
-        update_lay.addWidget(row1)
-        update_lay.addWidget(row2)
-        self.updateCard.setWidget(update_widget)
+        # 更新下载加速（独立卡片：直连与镜像并行探测取最快）
+        self.mirrorCard = _SettingCard(tr("settings.update_mirror"), tr("settings.update_mirror.hint"))
+        self.mirrorSwitch = SwitchButton()
+        self.mirrorCard.setWidget(self.mirrorSwitch)
 
         # ---- 投屏服务 ----
         self.serviceTitle = SubtitleLabel(tr("settings.group.service"))
@@ -193,6 +174,7 @@ class SettingsInterface(QWidget):
         root.addWidget(self.bootAutostartCard)
         root.addWidget(self.audioDeviceCard)
         root.addWidget(self.updateCard)
+        root.addWidget(self.mirrorCard)
         root.addSpacing(8)
         root.addWidget(self.serviceTitle)
         root.addWidget(self.autostartCard)
@@ -377,7 +359,8 @@ class SettingsInterface(QWidget):
         self.audioDeviceCard.descLabel.setText(tr("settings.audio_device.hint"))
         self.updateCard.titleLabel.setText(tr("settings.update"))
         self.updateCard.descLabel.setText(tr("settings.update.hint"))
-        self.mirrorLabel.setText(tr("settings.update.mirror"))
+        self.mirrorCard.titleLabel.setText(tr("settings.update_mirror"))
+        self.mirrorCard.descLabel.setText(tr("settings.update_mirror.hint"))
         self.checkUpdateButton.setText(tr("settings.check_update"))
         self._reload_audio_devices()  # 默认项文案随语言变化，整体重填
         self.serviceTitle.setText(tr("settings.group.service"))

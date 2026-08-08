@@ -16,12 +16,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
+    ComboBox,
     FluentIcon as FIF,
     Slider,
     ToolButton,
@@ -94,9 +94,12 @@ class ControlBar(QWidget):
         self._dragging_slider = False
 
         self.setFixedHeight(BAR_HEIGHT)
+        # QSS 用类选择器限定在条本体上——此前用 `QWidget` 通配会匹配到
+        # 所有子控件（时间标签/下拉框），在嵌入式形态下与半透明背景
+        # 二次混合，显示成一块块黑底
         self.setStyleSheet(
-            "QWidget { background: rgba(16, 16, 16, 0.88); }"
-            "QLabel { color: #e0e0e0; }"
+            "ControlBar { background: rgba(16, 16, 16, 0.88); }"
+            "ControlBar QLabel { color: #e0e0e0; background: transparent; }"
         )
         self._build_ui()
         self._connect()
@@ -134,10 +137,11 @@ class ControlBar(QWidget):
         self.durationLabel.setMinimumWidth(38)
         self.durationLabel.setAlignment(Qt.AlignCenter)
 
-        # 倍速
-        self.speedCombo = QComboBox(self)
+        # 倍速（qfluentwidgets ComboBox：自带 Fluent 样式，嵌入式形态
+        # 下背景/弹出菜单与主题一致）
+        self.speedCombo = ComboBox(self)
         for sp in _SPEEDS:
-            self.speedCombo.addItem(f"{sp}×" if sp != 1.0 else tr("player.speed.normal"), sp)
+            self.speedCombo.addItem(f"{sp}×" if sp != 1.0 else tr("player.speed.normal"), None, sp)
         self.speedCombo.setCurrentIndex(_SPEEDS.index(1.0))
         self.speedCombo.setFixedWidth(72)
         self.speedCombo.setToolTip(tr("player.speed"))

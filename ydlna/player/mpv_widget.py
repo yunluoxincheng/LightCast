@@ -49,6 +49,10 @@ class MpvWidget(QWidget):
         self._single_click_timer.setSingleShot(True)
         self._single_click_timer.setInterval(QApplication.doubleClickInterval() + 60)
         self._single_click_timer.timeout.connect(self.singleClicked.emit)
+        # 双击后的第二次 release 不再启动单击判定
+        # （双击序列：press1/release1 → press2(DblClick) → release2，
+        #  release2 若重新启动定时器，双击仍会误触发一次单击）
+        self._suppress_single_click = False
 
     # ------------------------------------------------------------------ #
     def attach_player(self) -> bool:
@@ -83,12 +87,18 @@ class MpvWidget(QWidget):
         """左键抬起：启动单击判定（双击到达时在 mouseDoubleClickEvent 取消）。"""
         self.mouseActivity.emit()
         if event.button() == Qt.MouseButton.LeftButton:
-            self._single_click_timer.start()
+            if self._suppress_single_click:
+                # 这是双击的第二次 release：不再启动单击判定
+                self._suppress_single_click = False
+            else:
+                self._single_click_timer.start()
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802, ANN001
-        # 取消待定的单击（避免双击全屏前先误触发一次播放/暂停）
+        # 取消待定的单击（避免双击全屏前先误触发一次播放/暂停）；
+        # 并抑制随之而来的第二次 release 重新启动单击判定
         self._single_click_timer.stop()
+        self._suppress_single_click = True
         self.mouseActivity.emit()
         self.mouseDoubleClicked.emit()
         super().mouseDoubleClickEvent(event)
