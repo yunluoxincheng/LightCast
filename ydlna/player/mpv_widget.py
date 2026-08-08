@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ..logger import get_logger
@@ -39,6 +40,9 @@ class MpvWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         # 黑底用 stylesheet（与已验证可渲染的最小测试完全一致）
         self.setStyleSheet("background: black;")
+        # 原生窗口 resize 瞬间（全屏切换等）系统会用窗口类默认背景刷一帧
+        # （浅色），mpv 重新适配画面时露出——自绘纯黑 + 不透明绘制消除闪色
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         # 接收未按下的鼠标移动事件（用于唤起控制栏）
         self.setMouseTracking(True)
         # 单击判定：双击判定窗口（doubleClickInterval，默认 400ms）内
@@ -71,6 +75,11 @@ class MpvWidget(QWidget):
         """兜底：若尚未 attach，尝试 attach。"""
         super().showEvent(event)
         self.attach_player()
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ANN001
+        """纯黑背景：全屏/还原瞬间不留系统默认浅色帧。"""
+        p = QPainter(self)
+        p.fillRect(self.rect(), Qt.GlobalColor.black)
 
     # ------------------------------------------------------------------ #
     # 鼠标事件 → mouseActivity

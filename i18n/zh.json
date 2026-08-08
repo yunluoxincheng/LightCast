@@ -101,6 +101,7 @@
   "dialog.update.available.body": "轻投 v{version} 已发布，是否下载并安装？",
   "dialog.update.download": "下载更新",
   "dialog.update.downloading": "正在下载更新…",
+  "dialog.update.cancel": "取消下载",
   "dialog.update.downloaded": "更新包已就绪（约 {size} MB），是否立即安装？",
   "dialog.update.install": "立即安装",
   "dialog.update.later": "稍后",

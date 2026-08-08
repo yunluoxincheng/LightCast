@@ -155,6 +155,9 @@ class SettingsInterface(QWidget):
         # 「检查更新」「项目主页」并排放在关于区（更符合用户直觉）
         self.githubButton = PushButton(FIF.LINK, tr("settings.about.github"))
         self.checkUpdateButton = PushButton(FIF.SYNC, tr("settings.check_update"))
+        # 固定宽度：检查中文本变长若不固定，卡片列宽变化会触发水平滚动条
+        # 出现/消失，垂直滚动位置被 clamp 回顶部（用户反馈的"跳回页顶"）
+        self.checkUpdateButton.setFixedWidth(110)
         about_buttons = QWidget()
         about_btn_lay = QHBoxLayout(about_buttons)
         about_btn_lay.setContentsMargins(0, 0, 0, 0)

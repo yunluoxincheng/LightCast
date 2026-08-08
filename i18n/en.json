@@ -101,6 +101,7 @@
   "dialog.update.available.body": "LightCast v{version} has been released. Download and install it now?",
   "dialog.update.download": "Download update",
   "dialog.update.downloading": "Downloading update…",
+  "dialog.update.cancel": "Cancel download",
   "dialog.update.downloaded": "Update ready (~{size} MB). Install now?",
   "dialog.update.install": "Install now",
   "dialog.update.later": "Later",

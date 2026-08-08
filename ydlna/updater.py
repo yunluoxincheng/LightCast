@@ -216,6 +216,9 @@ async def download_update(
             return await _download_from_source(
                 source, dest, on_progress, workers, timeout
             )
+        except asyncio.CancelledError:
+            # 用户取消：不换源重试，直接向上传播
+            raise
         except Exception as e:  # noqa: BLE001
             last_err = e
             log.warning("源 %s 下载失败: %s，换下一个", source, e)
@@ -247,18 +250,26 @@ async def _download_from_source(
 
     # 小文件/不支持 Range → 单线程流式（原有逻辑，避免多连接开销）
     if not ranges_ok or total < 2 * 1024 * 1024:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=timeout) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"下载失败: HTTP {resp.status}")
-                total = int(resp.headers.get("Content-Length") or 0)
-                done = 0
-                with open(dest, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(256 * 1024):
-                        f.write(chunk)
-                        done += len(chunk)
-                        if on_progress:
-                            on_progress(done, total)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=timeout) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"下载失败: HTTP {resp.status}")
+                    total = int(resp.headers.get("Content-Length") or 0)
+                    done = 0
+                    with open(dest, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(256 * 1024):
+                            f.write(chunk)
+                            done += len(chunk)
+                            if on_progress:
+                                on_progress(done, total)
+        except BaseException:
+            # 失败/取消：清理半成品
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return dest
 
     # 多线程动态分块：小任务队列，每个 worker 拉一块写一块
@@ -309,7 +320,8 @@ async def _download_from_source(
         async with asyncio.TaskGroup() as tg:
             for i in range(n):
                 tg.create_task(worker(i))
-    except Exception:
+    except BaseException:
+        # 失败/取消：关闭句柄并清理半成品
         fh.close()
         try:
             dest.unlink(missing_ok=True)
@@ -340,7 +352,7 @@ async def run_update_flow(parent, info: UpdateInfo, *, use_mirror: bool = True) 
     返回 True 表示已启动安装程序（应用即将退出）；False 表示用户取消或失败。
     """
     from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QVBoxLayout
-    from qfluentwidgets import InfoBar, InfoBarPosition, ProgressBar
+    from qfluentwidgets import InfoBar, InfoBarPosition, ProgressBar, PushButton
 
     from .i18n import tr
 
@@ -361,7 +373,7 @@ async def run_update_flow(parent, info: UpdateInfo, *, use_mirror: bool = True) 
     if box.clickedButton() is not dl_btn:
         return False
 
-    # 2. 下载（非模态进度窗，进度条由协程内回调刷新）
+    # 2. 下载（非模态进度窗，进度条由协程内回调刷新；可取消）
     dlg = QDialog(parent)
     dlg.setWindowTitle(tr("dialog.update.downloading"))
     dlg.setMinimumWidth(360)
@@ -370,14 +382,34 @@ async def run_update_flow(parent, info: UpdateInfo, *, use_mirror: bool = True) 
     bar = ProgressBar(dlg)
     bar.setRange(0, 1000)
     lay.addWidget(bar)
-    dlg.open()
+    cancel_btn = PushButton(tr("dialog.update.cancel"), dlg)
+    lay.addWidget(cancel_btn, 0, Qt.AlignRight)
 
     def _progress(done: int, total: int) -> None:
         bar.setValue(int(done * 1000 / total) if total else 0)
 
     dest = download_dir() / f"LightCast-Setup-{info.version}.exe"
+    task = asyncio.create_task(
+        download_update(info.setup_url, dest, _progress, use_mirror=use_mirror)
+    )
+
+    def _cancel() -> None:
+        """取消下载（按钮或关闭进度框），下载协程清理半成品后传播取消。"""
+        if not task.done():
+            task.cancel()
+
+    cancel_btn.clicked.connect(_cancel)
+    dlg.finished.connect(lambda _r: _cancel())
+    dlg.open()
+
     try:
-        await download_update(info.setup_url, dest, _progress, use_mirror=use_mirror)
+        await task
+    except asyncio.CancelledError:
+        # 用户取消：立即返回，按钮由调用方 finally 恢复
+        dlg.close()
+        dlg.deleteLater()
+        log.info("用户取消更新下载")
+        return False
     except Exception as e:  # noqa: BLE001
         dlg.close()
         dlg.deleteLater()
