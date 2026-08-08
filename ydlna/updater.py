@@ -14,7 +14,6 @@ import asyncio
 import html as _html
 import os
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -147,14 +146,18 @@ async def download_update(
     url: str,
     dest: Path,
     on_progress: Optional[Callable[[int, int], None]] = None,
-    parts: int = 4,
+    workers: int = 8,
 ) -> Path:
-    """下载更新包。
+    """下载更新包（IDM 式多线程加速）。
 
-    - 默认 4 段 Range 并发下载（多线程效果，速度显著提升）；
-      服务器不支持 Range / 大小未知时自动回退单线程流式下载
+    - 默认 8 个并发连接，动态分块（小任务队列 + os.pwrite 定位写）：
+      快的连接自动多干活，慢的连接少干——比固定等分更能吃满带宽
+      （借鉴 IDM 的思路：连接数多 + 快慢均衡 + 连接复用）
+    - 服务器不支持 Range / 大小未知 / 文件很小（<2MB）时自动回退
+      单线程流式下载
     - 分块写盘，不阻塞事件循环；on_progress(done, total) 在主线程协程内回调
     """
+    dest = Path(dest)
     timeout = aiohttp.ClientTimeout(total=None, connect=15)
 
     # 探测：Range 支持 + 总大小（GET bytes=0-0，206 + Content-Range）
@@ -169,8 +172,9 @@ async def download_update(
                 if m:
                     total = int(m.group(1))
                     ranges_ok = True
-    if not ranges_ok:
-        # 单线程流式（原有逻辑）
+
+    # 小文件/不支持 Range → 单线程流式（原有逻辑，避免多连接开销）
+    if not ranges_ok or total < 2 * 1024 * 1024:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=timeout) as resp:
                 if resp.status != 200:
@@ -185,54 +189,62 @@ async def download_update(
                             on_progress(done, total)
         return dest
 
-    # 分段并发
-    n = max(1, min(parts, total // (256 * 1024)))  # 每段至少 256KB，避免段过碎
-    if n <= 1:
-        n = 1
-    ranges = []
-    step = total // n
-    for i in range(n):
-        start = i * step
-        end = total - 1 if i == n - 1 else (i + 1) * step - 1
-        ranges.append((start, end))
-    done = [0] * n
-    part_paths = [Path(str(dest) + f".part{i}") for i in range(n)]
+    # 多线程动态分块：小任务队列，每个 worker 拉一块写一块
+    n = max(1, min(workers, total // (256 * 1024)))
+    chunk = max(1, total // (n * 4))  # 每连接约 4 块，块太大则快慢不均
+    queue: asyncio.Queue = asyncio.Queue()
+    pos = 0
+    while pos < total:
+        end = min(pos + chunk - 1, total - 1)
+        queue.put_nowait((pos, end))
+        pos = end + 1
 
-    async def fetch(i: int, start: int, end: int) -> None:
+    # 定位写：各 worker 写不同偏移。asyncio 单线程、write 同步完成，
+    # seek+write 之间没有 await，不存在交错；os.pwrite 在 Windows 不可用
+    with open(dest, "wb") as f:
+        f.truncate(total)
+    fh = open(dest, "r+b")
+    done_bytes = 0
+
+    async def worker(i: int) -> None:
+        nonlocal done_bytes
+        # 每个 worker 一个会话：连接全程复用（keep-alive），无重复握手
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                headers={"Range": f"bytes={start}-{end}"},
-                timeout=timeout,
-            ) as resp:
-                if resp.status != 206:
-                    raise RuntimeError(f"分段 {i} 下载失败: HTTP {resp.status}")
-                with open(part_paths[i], "wb") as f:
-                    async for chunk in resp.content.iter_chunked(256 * 1024):
-                        f.write(chunk)
-                        done[i] += len(chunk)
-                        if on_progress:
-                            on_progress(sum(done), total)
+            while True:
+                try:
+                    start, end = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                async with session.get(
+                    url,
+                    headers={"Range": f"bytes={start}-{end}"},
+                    timeout=timeout,
+                ) as resp:
+                    if resp.status != 206:
+                        raise RuntimeError(f"分段 {i} 下载失败: HTTP {resp.status}")
+                    data = await resp.read()
+                if len(data) != end - start + 1:
+                    raise RuntimeError(
+                        f"分段 {i} 长度异常 {len(data)} != {end - start + 1}"
+                    )
+                fh.seek(start)
+                fh.write(data)
+                done_bytes += len(data)
+                if on_progress:
+                    on_progress(done_bytes, total)
 
     try:
-        await asyncio.gather(*(fetch(i, s, e) for i, (s, e) in enumerate(ranges)))
+        async with asyncio.TaskGroup() as tg:
+            for i in range(n):
+                tg.create_task(worker(i))
     except Exception:
-        # 失败清理半成品
-        for p in part_paths:
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                pass
+        fh.close()
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
-    # 按序拼接
-    with open(dest, "wb") as out:
-        for p in part_paths:
-            with open(p, "rb") as f:
-                shutil.copyfileobj(f, out, 1024 * 1024)
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                pass
+    fh.close()
     return dest
 
 

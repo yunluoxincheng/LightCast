@@ -115,15 +115,8 @@ class SettingsInterface(QWidget):
 
         # ---- 自动更新 ----
         self.updateCard = _SettingCard(tr("settings.update"), tr("settings.update.hint"))
-        update_widget = QWidget()
-        update_lay = QHBoxLayout(update_widget)
-        update_lay.setContentsMargins(0, 0, 0, 0)
-        update_lay.setSpacing(10)
         self.updateSwitch = SwitchButton()
-        self.checkUpdateButton = PushButton(tr("settings.check_update"))
-        update_lay.addWidget(self.updateSwitch)
-        update_lay.addWidget(self.checkUpdateButton)
-        self.updateCard.setWidget(update_widget)
+        self.updateCard.setWidget(self.updateSwitch)
 
         # ---- 投屏服务 ----
         self.serviceTitle = SubtitleLabel(tr("settings.group.service"))
@@ -154,11 +147,19 @@ class SettingsInterface(QWidget):
         self.aboutDesc.setWordWrap(True)
         self.aboutLicense = BodyLabel(tr("settings.about.license"))
         self.aboutLicense.setEnabled(False)
+        # 「检查更新」「项目主页」并排放在关于区（更符合用户直觉）
         self.githubButton = PushButton(FIF.LINK, tr("settings.about.github"))
+        self.checkUpdateButton = PushButton(FIF.SYNC, tr("settings.check_update"))
+        about_buttons = QWidget()
+        about_btn_lay = QHBoxLayout(about_buttons)
+        about_btn_lay.setContentsMargins(0, 0, 0, 0)
+        about_btn_lay.setSpacing(10)
+        about_btn_lay.addWidget(self.githubButton)
+        about_btn_lay.addWidget(self.checkUpdateButton)
         about_lay.addWidget(self.aboutName)
         about_lay.addWidget(self.aboutDesc)
         about_lay.addWidget(self.aboutLicense)
-        about_lay.addWidget(self.githubButton, 0, Qt.AlignLeft)
+        about_lay.addWidget(about_buttons, 0, Qt.AlignLeft)
 
         root.addWidget(self.titleLabel)
         root.addSpacing(4)
