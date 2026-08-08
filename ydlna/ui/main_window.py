@@ -40,6 +40,13 @@ class MainWindow(MSFluentWindow):
         parent=None,
     ) -> None:  # noqa: ANN001
         super().__init__(parent)
+        # 禁用 Mica 背景特效：全屏/还原切换时 DWM 重建表面，Mica 失效会
+        # 回退到系统浅色背景（表现为"退出全屏瞬间整体闪浅色"）。
+        # 纯 QSS 背景在两种状态下表现一致，无闪烁
+        try:
+            self.setMicaEffectEnabled(False)
+        except Exception:  # noqa: BLE001
+            pass
         self._player = player
         self._server = server
         self._config = config

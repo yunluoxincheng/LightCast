@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame,
@@ -47,6 +47,45 @@ if TYPE_CHECKING:
     pass
 
 log = get_logger("ui.player")
+
+
+class _MediaShortcutFilter(QObject):
+    """应用级播放快捷键过滤器。
+
+    问题背景：keyPressEvent 只在页面有键盘焦点时生效——点击进度条后焦点
+    落在 Slider 上、点击悬浮控制栏后焦点落在工具窗口上，空格/方向键/Esc
+    全部失效。
+
+    方案：在 QApplication 上装事件过滤器，拦截按键（不依赖焦点）：
+    - 焦点在文本输入框/下拉框时放行（设置页输入不受影响）
+    - Esc/F 仅在播放器页可见时生效（避免在设置页误触全屏）
+    """
+
+    def __init__(self, handler: "PlayerInterface") -> None:
+        super().__init__(handler)
+        self._handler = handler
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: ANN001, N802
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtWidgets import (
+            QApplication,
+            QComboBox,
+            QLineEdit,
+            QPlainTextEdit,
+            QTextEdit,
+        )
+
+        if event.type() != QEvent.Type.KeyPress or not isinstance(event, QKeyEvent):
+            return False
+        # 文本输入 / 下拉框：按键原样交给控件（如设备名输入、倍速下拉）
+        w = QApplication.focusWidget()
+        if isinstance(w, (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox)):
+            return False
+        action = self._handler._shortcut_actions.get(event.key())
+        if action is None:
+            return False
+        action()
+        return True  # 已消费，不再向任何控件派发
 
 
 class _Spinner(QWidget):
@@ -142,6 +181,11 @@ class PlayerInterface(QWidget):
         self._connect()
         self._retranslate()
         Translator.instance().languageChanged.connect(self._retranslate)
+        # 应用级播放快捷键（不依赖焦点：点击进度条/控制栏后依然生效）
+        from PySide6.QtWidgets import QApplication
+        self._shortcut_actions = self._build_shortcut_actions()
+        self._shortcut_filter = _MediaShortcutFilter(self)
+        QApplication.instance().installEventFilter(self._shortcut_filter)
 
     # ------------------------------------------------------------------ #
     # UI
@@ -429,33 +473,31 @@ class PlayerInterface(QWidget):
     toggleFullscreenRequested = Signal()
 
     # ------------------------------------------------------------------ #
-    # 键盘/鼠标快捷键
+    # 键盘/鼠标快捷键（由应用级 _MediaShortcutFilter 统一分发，不依赖焦点）
     # ------------------------------------------------------------------ #
-    def keyPressEvent(self, event) -> None:  # noqa: N802, ANN001
-        from PySide6.QtGui import QKeyEvent
-        if not isinstance(event, QKeyEvent):
-            return super().keyPressEvent(event)
-        self._show_controls()
-        key = event.key()
-        if key == Qt.Key_Escape:
-            self.toggleFullscreenRequested.emit()  # MainWindow 会判断是否退出全屏
-        elif key == Qt.Key_F:
-            self.toggleFullscreenRequested.emit()
-        elif key == Qt.Key_Space:
-            self._player.play_pause()
-        elif key == Qt.Key_Right:
-            self._player.seek_relative(10)
-        elif key == Qt.Key_Left:
-            self._player.seek_relative(-10)
-        elif key == Qt.Key_Up:
-            self._player.set_volume(min(100, self._player.get_volume() + 5))
-        elif key == Qt.Key_Down:
-            self._player.set_volume(max(0, self._player.get_volume() - 5))
-        else:
-            super().keyPressEvent(event)
+    def _build_shortcut_actions(self) -> dict:
+        """播放快捷键表：键 → 动作。Esc/F 仅播放器页可见时生效。"""
+        p = self._player
+
+        def _toggle_fullscreen() -> None:
+            if self.isVisible():
+                self._on_fullscreen_requested()
+
+        return {
+            Qt.Key_Space: lambda: (self._show_controls(), p.play_pause()),
+            Qt.Key_Right: lambda: (self._show_controls(), p.seek_relative(10)),
+            Qt.Key_Left: lambda: (self._show_controls(), p.seek_relative(-10)),
+            Qt.Key_Up: lambda: (self._show_controls(),
+                                p.set_volume(min(100, p.get_volume() + 5))),
+            Qt.Key_Down: lambda: (self._show_controls(),
+                                  p.set_volume(max(0, p.get_volume() - 5))),
+            Qt.Key_Escape: _toggle_fullscreen,
+            Qt.Key_F: _toggle_fullscreen,
+        }
 
     def mousePressEvent(self, event) -> None:  # noqa: N802, ANN001
-        # 点击页面获得键盘焦点（快捷键才能生效）
+        # 点击页面获得键盘焦点（部分控件仍可能吞焦点，快捷键已由
+        # 应用级过滤器兜底，不依赖焦点）
         self.setFocus()
         self._show_controls()
         super().mousePressEvent(event)
