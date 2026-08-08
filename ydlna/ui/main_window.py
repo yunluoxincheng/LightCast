@@ -167,10 +167,23 @@ class MainWindow(MSFluentWindow):
 
     # ------------------------------------------------------------------ #
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        """关闭窗口时最小化到托盘（首次弹提示，可勾选「不再提示」）。"""
+        """关闭窗口时最小化到托盘（首次弹提示，可勾选「不再提示」）。
+
+        系统触发的关闭（Windows 关机/注销、安装器 Restart Manager 的
+        关闭请求）不走托盘逻辑：保存几何后直接退出进程——否则应用会
+        赖在托盘不退出，安装器无法覆盖升级 exe（只能等强杀）。
+        """
         # 保存几何
         g = self.geometry()
         self._config.set("window_geometry", [g.x(), g.y(), g.width(), g.height()])
+
+        if event.spontaneous():
+            # 系统/安装器触发的关闭：优雅退出（不弹最小化提示，不残留进程）
+            log.info("系统触发的关闭（关机/注销/安装器关闭请求），直接退出")
+            from PySide6.QtWidgets import QApplication
+            QApplication.instance().quit()
+            event.accept()
+            return
 
         if not self._minimize_hint_shown:
             try:
