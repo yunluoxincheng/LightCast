@@ -156,8 +156,11 @@ class SettingsInterface(QWidget):
         self.githubButton = PushButton(FIF.LINK, tr("settings.about.github"))
         self.checkUpdateButton = PushButton(FIF.SYNC, tr("settings.check_update"))
         # 固定宽度：检查中文本变长若不固定，卡片列宽变化会触发水平滚动条
-        # 出现/消失，垂直滚动位置被 clamp 回顶部（用户反馈的"跳回页顶"）
+        # 出现/消失，垂直滚动位置被 clamp 回顶部
         self.checkUpdateButton.setFixedWidth(110)
+        # NoFocus：点击按钮不抢焦点——检查期间按钮被禁用时焦点不会逃逸，
+        # 否则 ScrollArea 会自动滚动到新焦点控件（页面跳回顶部）
+        self.checkUpdateButton.setFocusPolicy(Qt.NoFocus)
         about_buttons = QWidget()
         about_btn_lay = QHBoxLayout(about_buttons)
         about_btn_lay.setContentsMargins(0, 0, 0, 0)

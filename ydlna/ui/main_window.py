@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QIcon
 from qfluentwidgets import (
     FluentIcon as FIF,
@@ -47,6 +47,10 @@ class MainWindow(MSFluentWindow):
             self.setMicaEffectEnabled(False)
         except Exception:  # noqa: BLE001
             pass
+        # 窗口不透明绘制：resize（全屏切换）时不做系统清屏，消除白闪帧
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        # 窗口就绪后把 DWM 帧强制为沉浸式深色（不随系统浅色主题变白）
+        QTimer.singleShot(100, self._apply_dark_dwm_frame)
         self._player = player
         self._server = server
         self._config = config
@@ -106,6 +110,27 @@ class MainWindow(MSFluentWindow):
             if p.exists():
                 return QIcon(str(p))
         return QIcon()
+
+    def _apply_dark_dwm_frame(self) -> None:
+        """DWM 沉浸式深色模式：窗口边框/扩展帧不随系统浅色主题变白。
+
+        qframelesswindow 的无边框窗口保留 DWM 绘制的缩放边框，颜色跟随
+        Windows 主题——系统为浅色时全屏切换会闪白边框。此调用在窗口
+        句柄上强制深色帧（属性持久，全屏切换不失效）。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            hwnd = wintypes.HWND(int(self.winId()))
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            value = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                ctypes.byref(value), ctypes.sizeof(value),
+            )
+            log.info("已应用 DWM 沉浸式深色帧")
+        except Exception as e:  # noqa: BLE001
+            log.debug("设置 DWM 深色帧失败: %s", e)
 
     # ------------------------------------------------------------------ #
     def switch_to_player(self) -> None:
