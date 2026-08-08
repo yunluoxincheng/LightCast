@@ -36,6 +36,16 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}（{#MyAppNameEn}）
+; 升级/覆盖安装时自动关闭正在运行的轻投（否则 exe 被锁定，旧文件残留，
+; 表现为「装了新版但界面没变化」），安装完不自动重启应用
+CloseApplications=yes
+CloseApplicationsFilter={#MyAppExeName}
+RestartApplications=no
+
+[InstallDelete]
+; onedir 升级：先清空 _internal（第三方库目录），避免新旧文件混杂
+; （应用自身模块在 exe 内的 PYZ 归档里，会被 CloseApplications + ignoreversion 正常替换）
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Languages]
 ; 中文翻译不随 Inno Setup 安装包附带，仓库内置了官方文件

@@ -43,7 +43,11 @@ def ensure_bin_in_path() -> None:
 # 应用元信息
 # --------------------------------------------------------------------------- #
 APP_NAME: str = "LightCast"
-APP_VERSION: str = "0.1.0"
+# 版本号跟随 ydlna.__version__（发布 workflow 会在打包时按 tag 同步，
+# 保证「关于」页与 Release 版本一致；不要在这里硬编码）
+from . import __version__ as _version  # noqa: E402
+
+APP_VERSION: str = _version
 APP_DISPLAY_NAME: str = "轻投"
 
 # 配置文件/日志：开发模式放项目目录；打包（frozen）后放 %APPDATA%\LightCast，
