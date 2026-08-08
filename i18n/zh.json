@@ -84,7 +84,7 @@
   "common.now": "现在",
   "common.later": "稍后",
   "settings.autostart": "开机自动运行轻投",
-  "settings.autostart.hint": "登录 Windows 后自动在后台启动，无需手动打开",
+  "settings.autostart.hint": "登录 Windows 后自动在后台运行（托盘常驻），无需手动打开",
   "settings.autostart.fail": "设置开机自启失败",
   "settings.audio_device": "音频输出设备",
   "settings.audio_device.hint": "选择声音从哪个设备播放（插入或拔出设备后自动刷新）",

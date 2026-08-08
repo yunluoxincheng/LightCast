@@ -84,7 +84,7 @@
   "common.now": "Now",
   "common.later": "Later",
   "settings.autostart": "Launch LightCast at Windows startup",
-  "settings.autostart.hint": "Start automatically in the background after logging into Windows",
+  "settings.autostart.hint": "Start silently in the background (system tray) after logging into Windows",
   "settings.autostart.fail": "Failed to set startup launch",
   "settings.audio_device": "Audio output device",
   "settings.audio_device.hint": "Choose which device plays the sound (refreshes automatically when devices are plugged in or out)",

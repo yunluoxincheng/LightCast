@@ -57,6 +57,11 @@ async def run() -> int:
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)  # 关闭主窗口不退出（最小化到托盘）
 
+    # 开机自启（--autostart）：静默启动到托盘，不弹主窗口
+    start_hidden = "--autostart" in sys.argv
+    if start_hidden:
+        log.info("开机自启启动（静默托盘模式）")
+
     config = Config.instance()
     setup_logging()
     _apply_language(config)
@@ -152,16 +157,34 @@ async def run() -> int:
     # 播放器页的全屏请求 → 主窗口全屏（隐藏导航栏）
     window.playerInterface.toggleFullscreenRequested.connect(window.toggle_fullscreen)
 
-    # 显示窗口 + 托盘
-    window.show()
+    # 显示窗口 + 托盘（自启静默模式只出托盘，主窗口等投屏到达/点托盘再弹）
+    if not start_hidden:
+        window.show()
     tray.show()
 
     # 关键：先切到播放器页让 MpvWidget 显示并拿到 HWND，再 attach mpv。
     def _ensure_mpv_ready():
-        # 确保渲染区已显示（winId 才有效）；切回初始页（默认主页）
+        # 确保渲染区已拿到原生窗口句柄；切回初始页（默认主页）
         window.switch_to_player()
-        window.playerInterface._on_page_shown()
-        ok = window.playerInterface.mpvWidget.attach_player()
+        page = window.playerInterface
+        if page.isVisible():
+            page._on_page_shown()
+        else:
+            # 自启静默模式：窗口隐藏，强制创建 HWND 并 attach，
+            # 投屏到达时窗口弹出即可直接出画面
+            page.mpvWidget.winId()
+            ok = page.mpvWidget.attach_player()
+            if ok:
+                log.info("mpv 已就绪（隐藏窗口，投屏可立即播放）")
+                # 切回主页，等投屏到达再自动切到播放器页
+                try:
+                    window.switchTo(window.homeInterface)
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            QTimer.singleShot(300, _ensure_mpv_ready)
+            return
+        ok = page.mpvWidget.attach_player()
         if ok:
             log.info("mpv 已就绪（投屏可立即播放）")
             # 切回主页，等投屏到达再自动切到播放器页
