@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QGridLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
     BodyLabel,
@@ -113,6 +113,18 @@ class SettingsInterface(QWidget):
         self.audioDeviceCombo.setMinimumWidth(220)
         self.audioDeviceCard.setWidget(self.audioDeviceCombo)
 
+        # ---- 自动更新 ----
+        self.updateCard = _SettingCard(tr("settings.update"), tr("settings.update.hint"))
+        update_widget = QWidget()
+        update_lay = QHBoxLayout(update_widget)
+        update_lay.setContentsMargins(0, 0, 0, 0)
+        update_lay.setSpacing(10)
+        self.updateSwitch = SwitchButton()
+        self.checkUpdateButton = PushButton(tr("settings.check_update"))
+        update_lay.addWidget(self.updateSwitch)
+        update_lay.addWidget(self.checkUpdateButton)
+        self.updateCard.setWidget(update_widget)
+
         # ---- 投屏服务 ----
         self.serviceTitle = SubtitleLabel(tr("settings.group.service"))
 
@@ -180,6 +192,7 @@ class SettingsInterface(QWidget):
         from ..autostart import is_enabled
         self.bootAutostartSwitch.setChecked(is_enabled())
         self._reload_audio_devices()
+        self.updateSwitch.setChecked(bool(self._config.get("auto_update", True)))
         self.autostartSwitch.setChecked(bool(self._config.get("dlna_enabled", True)))
         self.deviceNameEdit.setText(self._config.get("friendly_name", ""))
         self.portEdit.setText(str(self._config.get("http_port", 0)))
@@ -203,6 +216,8 @@ class SettingsInterface(QWidget):
         self.themeCombo.currentIndexChanged.connect(self._on_theme_changed)
         self.bootAutostartSwitch.checkedChanged.connect(self._on_boot_autostart_changed)
         self.audioDeviceCombo.currentIndexChanged.connect(self._on_audio_device_changed)
+        self.updateSwitch.checkedChanged.connect(self._on_update_switch_changed)
+        self.checkUpdateButton.clicked.connect(self._on_check_update_clicked)
         self.autostartSwitch.checkedChanged.connect(self._on_autostart_changed)
         self.deviceNameEdit.textChanged.connect(self._on_device_name_changed)
         self.portEdit.textChanged.connect(self._on_port_changed)
@@ -244,6 +259,56 @@ class SettingsInterface(QWidget):
         self._config.set("audio_device", name)
         self._player.set_audio_device(name)
 
+    # ------------------------------------------------------------------ #
+    # 自动更新
+    # ------------------------------------------------------------------ #
+    def _on_update_switch_changed(self, checked: bool) -> None:
+        self._config.set("auto_update", checked)
+
+    def _on_check_update_clicked(self) -> None:
+        """手动检查更新（异步，非阻塞；结果用 InfoBar / 更新流程提示）。"""
+        import asyncio
+
+        from ..updater import check_for_update, run_update_flow
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        btn = self.checkUpdateButton
+        btn.setEnabled(False)
+        btn.setText(tr("settings.check_update.checking"))
+
+        async def _do() -> None:
+            try:
+                info = await check_for_update()
+            except Exception as e:  # noqa: BLE001
+                log.warning("手动检查更新失败: %s", e)
+                InfoBar.error(
+                    title=tr("settings.check_update.failed"),
+                    content=str(e),
+                    orient=Qt.Horizontal,
+                    isClosable=True,
+                    duration=6000,
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                )
+            else:
+                if info is None:
+                    InfoBar.success(
+                        title=tr("settings.check_update.up_to_date"),
+                        content=f"v{APP_VERSION}",
+                        orient=Qt.Horizontal,
+                        isClosable=True,
+                        duration=4000,
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                    )
+                else:
+                    await run_update_flow(self.window(), info)
+            finally:
+                btn.setEnabled(True)
+                btn.setText(tr("settings.check_update"))
+
+        asyncio.ensure_future(_do())
+
     def _on_autostart_changed(self, checked: bool) -> None:
         self._config.set("dlna_enabled", checked)
 
@@ -276,6 +341,9 @@ class SettingsInterface(QWidget):
         self.bootAutostartCard.descLabel.setText(tr("settings.autostart.hint"))
         self.audioDeviceCard.titleLabel.setText(tr("settings.audio_device"))
         self.audioDeviceCard.descLabel.setText(tr("settings.audio_device.hint"))
+        self.updateCard.titleLabel.setText(tr("settings.update"))
+        self.updateCard.descLabel.setText(tr("settings.update.hint"))
+        self.checkUpdateButton.setText(tr("settings.check_update"))
         self._reload_audio_devices()  # 默认项文案随语言变化，整体重填
         self.serviceTitle.setText(tr("settings.group.service"))
         self.autostartCard.titleLabel.setText(tr("settings.service.enabled"))

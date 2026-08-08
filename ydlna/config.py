@@ -31,6 +31,8 @@ DEFAULTS: dict[str, Any] = {
     "muted": False,
     # 音频输出设备（mpv audio-device 名，"" = 默认）
     "audio_device": "",
+    # 启动时自动检查 GitHub Release 更新
+    "auto_update": True,
     # 窗口几何（x, y, w, h），None 表示用系统默认
     "window_geometry": None,
     # 窗口默认尺寸版本标记（每次调整默认尺寸时 +1，首次启动重置一次旧几何）

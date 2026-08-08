@@ -197,6 +197,28 @@ async def run() -> int:
 
     QTimer.singleShot(100, _ensure_mpv_ready)
 
+    # 自动更新检查（默认开启，可在设置中关闭；失败静默不打扰）
+    def _startup_update_check() -> None:
+        if not config.get("auto_update", True):
+            return
+        from .updater import check_for_update, run_update_flow
+
+        async def _do() -> None:
+            try:
+                info = await check_for_update()
+            except Exception as e:  # noqa: BLE001
+                log.warning("自动检查更新失败: %s", e)
+                return
+            if info is not None:
+                log.info("发现新版本 v%s", info.version)
+                # 静默托盘模式下提示框不能挂在隐藏窗口上
+                parent = window if window.isVisible() else None
+                await run_update_flow(parent, info)
+
+        asyncio.create_task(_do())
+
+    QTimer.singleShot(4000, _startup_update_check)
+
     # 初始设备信息
     window.refresh_device_info(
         config.get("friendly_name", "轻投"),

@@ -136,4 +136,10 @@ ISCC.exe /DMyAppVersion=1.2.0 packaging\installer.iss
 
 ### 3. 发布（GitHub Actions）
 
-推送 `v*` 标签即自动构建并发布 Release（安装版 + 便携版），见 [`.github/workflows/release.yml`](../.github/workflows/release.yml)。手动触发（workflow_dispatch）只出包不发布，产物挂在 run 的 Artifacts。
+推送 `v*` 标签即自动构建并发布 Release（安装版 + 便携版），Release 说明自动取自 [`CHANGELOG.md`](../CHANGELOG.md) 对应版本的小节。手动触发（workflow_dispatch）只出包不发布，产物挂在 run 的 Artifacts。
+
+### 4. 自动更新（`ydlna/updater.py`）
+
+- 启动时（延迟 4s）查 GitHub latest release，`__version__` 低于最新标签则提示更新（默认开启，`config.auto_update` 控制）
+- 下载用 aiohttp 流式分块（不阻塞事件循环），弹窗全部是 Qt 原生 QMessageBox + 非阻塞 `open()` + 信号转 future 等待——**不要**改成 `exec()`（打包版会卡死）
+- 安装包下载到 `%APPDATA%\LightCast\updates\`，安装前先退出应用（释放文件占用）
