@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-09）：61 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256 与后台任务退出清理；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-09）：62 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256 与后台任务退出清理；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -162,7 +162,7 @@
 ### H6. asyncio task 未持有引用 + 退出未取消
 
 - **文件**：`ydlna/app.py:147, 221`；`ydlna/ui/settings_interface.py:332`；`ydlna/player/hls_rewriter.py:563`
-- **状态**：`[x]` 已修复（2026-08-09）：新增 `BackgroundTasks` 统一持有后台任务、完成后取出异常并移除引用、组件退出时 cancel + gather；应用启停/自动更新、设置页手动更新和 HLS 预热均纳入对应生命周期。代理停止会先等待预热任务取消再关闭 session，`_read_capped` 不再吞掉 `CancelledError`，所有调用点以 `finally` 关闭响应。应用最终退出还会显式 `await RendererBridge.shutdown_all()`，停止并清空当前 HLS / Direct proxy，不依赖事件循环销毁兜底。
+- **状态**：`[x]` 已修复（2026-08-09）：新增 `BackgroundTasks` 统一持有后台任务、完成后取出异常并移除引用、组件退出时 cancel + gather；应用启停/自动更新、设置页手动更新、DLNA 进度轮询和 HLS 预热均纳入对应生命周期。同步关闭服务只对轮询发出一次 cancel，应用最终退出的 `RendererBridge.shutdown_all()` 会等待注册表中的轮询真正结束，再停止并清空当前 HLS / Direct proxy。代理停止会先等待预热任务取消再关闭 session；`_read_capped` 不再吞掉 `CancelledError`，所有调用点以 `finally` 关闭响应。
 - **问题**：`asyncio.create_task` / `ensure_future` 的返回值未保存。事件循环只对 task 持弱引用，
   可能被 GC 静默取消（官方文档明确警告）；退出时未取消会触发 `Task was destroyed but it is pending`
   警告。`hls_rewriter.py:563` 的预热任务同样无引用、`stop()` 不取消，旧 proxy 被任务引用住无法 GC

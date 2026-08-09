@@ -53,10 +53,21 @@ class BackgroundTasks:
         current = asyncio.current_task()
         tasks = tuple(
             task for task in self._tasks
-            if task is not current and not task.done()
+            if task is not current
         )
         for task in tasks:
             task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.difference_update(tasks)
+
+    async def wait_all(self) -> None:
+        """等待已被外部取消/结束的任务，不再次发送 cancel。"""
+        current = asyncio.current_task()
+        tasks = tuple(
+            task for task in self._tasks
+            if task is not current
+        )
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.difference_update(tasks)

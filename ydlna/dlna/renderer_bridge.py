@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Optional
 
 from defusedxml import ElementTree as ET  # 安全 XML 解析
 
+from ..async_tasks import BackgroundTasks
 from ..logger import get_logger
 from ..player._url_guard import UrlBlockedError, validate_upstream_url
 from ..player.mpv_player import Player
@@ -125,6 +126,7 @@ class RendererBridge:
         self._rc: Optional["RenderingControlService"] = None
         self._cm: Optional["ConnectionManagerService"] = None
         self._poll_task: Optional[asyncio.Task] = None
+        self._poll_tasks = BackgroundTasks()
         self._last_position: Optional[float] = None
         self._last_duration: Optional[float] = None
         # 投屏到达（SetAVTransportURI）回调：由 app 注入，用于立即切页 + 缓冲动画
@@ -325,10 +327,12 @@ class RendererBridge:
     def _start_polling(self) -> None:
         if self._poll_task is None or self._poll_task.done():
             try:
-                loop = asyncio.get_event_loop()
+                asyncio.get_running_loop()
             except RuntimeError:
                 return
-            self._poll_task = loop.create_task(self._poll_loop())
+            self._poll_task = self._poll_tasks.create(
+                self._poll_loop(), name="renderer-position-poll"
+            )
 
     def _stop_polling(self) -> None:
         if self._poll_task is not None and not self._poll_task.done():
@@ -375,11 +379,10 @@ class RendererBridge:
 
     async def shutdown_all(self) -> None:
         """应用退出清理：等待轮询退出，并停止所有当前媒体代理。"""
-        poll_task = self._poll_task
-        self._stop_polling()
-        if poll_task is not None:
-            await asyncio.gather(poll_task, return_exceptions=True)
-        self._poll_task = None
+        self.shutdown()
+        # shutdown() 只负责同步发出一次 cancel；任务仍由注册表强引用持有，
+        # 此处等待它真正退出，且不重复 cancel（避免打断其取消清理逻辑）。
+        await self._poll_tasks.wait_all()
 
         for attr in ("_hls_proxy", "_direct_proxy"):
             proxy = getattr(self, attr, None)

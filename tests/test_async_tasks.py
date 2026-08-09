@@ -146,6 +146,7 @@ def test_application_shutdown_stops_active_proxy_warm_task_and_session(
 
         bridge = RendererBridge.__new__(RendererBridge)
         bridge._poll_task = None
+        bridge._poll_tasks = BackgroundTasks()
         bridge._hls_proxy = proxy
         bridge._direct_proxy = None
 
@@ -155,6 +156,52 @@ def test_application_shutdown_stops_active_proxy_warm_task_and_session(
         assert response.closed is True
         assert session.closed is True
         assert bridge._hls_proxy is None
+
+    asyncio.run(scenario())
+
+
+def test_server_shutdown_then_application_shutdown_waits_for_poll_task() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def poll() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finished.set()
+
+        bridge = RendererBridge.__new__(RendererBridge)
+        bridge._poll_tasks = BackgroundTasks()
+        bridge._poll_task = bridge._poll_tasks.create(
+            poll(), name="active-renderer-poll"
+        )
+        bridge._hls_proxy = None
+        bridge._direct_proxy = None
+
+        class UpnpServer:
+            async def async_stop(self) -> None:
+                pass
+
+        server = DlnaServer.__new__(DlnaServer)
+        server._running = True
+        server._server = UpnpServer()
+        server._ssdp = None
+        server._bridge = bridge
+
+        await started.wait()
+        poll_task = bridge._poll_task
+
+        # 与 app.run() 相同顺序：server stop 先同步取消轮询，随后应用级清理等待。
+        await server.async_stop()
+        assert bridge._poll_task is None
+
+        await bridge.shutdown_all()
+
+        assert poll_task is not None and poll_task.done()
+        assert finished.is_set()
+        assert len(bridge._poll_tasks) == 0
 
     asyncio.run(scenario())
 
