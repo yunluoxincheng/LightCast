@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import platform
 import sys
 from typing import Optional
@@ -145,6 +146,9 @@ class DlnaServer:
             location_path="/device.xml",
         )
         self._ssdp.start()
+        # Thread.start() 只表示线程已调度，不代表 bind/join multicast 成功。
+        # 同步 Event.wait 放到工作线程，避免阻塞 qasync/Qt 主事件循环。
+        await asyncio.to_thread(self._ssdp.wait_until_ready)
 
         self._running = True
         log.info(
@@ -160,9 +164,12 @@ class DlnaServer:
             return
         log.info("停止 DLNA 服务")
         # 先停 SSDP（发 byebye）
-        if self._ssdp is not None:
-            self._ssdp.stop()
-            self._ssdp = None
+        ssdp = self._ssdp
+        if ssdp is not None:
+            # stop() 内部有有界 join，同样不能阻塞 qasync/Qt 主事件循环。
+            await asyncio.to_thread(ssdp.stop)
+            if self._ssdp is ssdp:
+                self._ssdp = None
         self._bridge.shutdown()
         server = self._server
         if server is not None:

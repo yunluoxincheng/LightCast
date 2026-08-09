@@ -41,6 +41,8 @@ log = get_logger("dlna.ssdp")
 SSDP_ADDR = "239.255.255.250"
 SSDP_PORT = 1900
 SSDP_GROUP = (SSDP_ADDR, SSDP_PORT)
+SSDP_START_TIMEOUT = 2.0
+SSDP_STOP_TIMEOUT = 2.0
 
 
 def _parse_headers(data: bytes) -> tuple[str, dict[str, str]]:
@@ -137,8 +139,11 @@ class SsdpListener(threading.Thread):
         self._sock: socket.socket | None = None
         self._senders: list[_MulticastSender] = []
         self._ips: list[tuple[str, str]] = []
+        self._resources_lock = threading.RLock()
         self._running = threading.Event()
-        self._running.set()  # 启动后置位，run 循环里检查它
+        self._running.set()  # 初始化为运行状态；stop() 时 clear
+        self._startup_done = threading.Event()
+        self._startup_error: Exception | None = None
 
         # 本设备响应的 ST 列表（macast 的 6 条；M-SEARCH 命中任一即回复）
         self._st_list = [
@@ -156,71 +161,78 @@ class SsdpListener(threading.Thread):
     def run(self) -> None:
         try:
             self._setup_socket()
-        except OSError as e:
+        except Exception as e:  # noqa: BLE001
+            self._startup_error = e
+            self._startup_done.set()
             log.error("SSDP 监听 socket 建立失败，设备将无法被发现: %s", e)
+            self._cleanup()
             return
 
+        self._startup_done.set()
         log.info(
             "SsdpListener 已启动，监听 0.0.0.0:%d，多播组加入网卡: %s",
             SSDP_PORT, [ip for ip, _ in self._ips],
         )
 
-        # 启动时立即广播一次 alive，加速被发现
-        self._notify_alive()
+        try:
+            # 启动时立即广播一次 alive，加速被发现
+            self._notify_alive()
 
-        last_announce = 0.0
-        while self._running.is_set():
-            # 周期性广播 alive
-            import time
-            now = time.time()
-            if now - last_announce >= self._announce_interval:
-                self._notify_alive()
-                last_announce = now
+            last_announce = 0.0
+            while self._running.is_set():
+                # 周期性广播 alive
+                import time
+                now = time.time()
+                if now - last_announce >= self._announce_interval:
+                    self._notify_alive()
+                    last_announce = now
 
-            try:
-                assert self._sock is not None
-                data, addr = self._sock.recvfrom(4096)
-            except socket.timeout:
-                continue
-            except OSError as e:
-                if self._running.is_set():
-                    log.warning("SSDP recvfrom 异常: %s", e)
-                break
-            self._handle_packet(data, addr)
-
-        self._cleanup()
+                try:
+                    assert self._sock is not None
+                    data, addr = self._sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                except OSError as e:
+                    if self._running.is_set():
+                        log.warning("SSDP recvfrom 异常: %s", e)
+                    break
+                self._handle_packet(data, addr)
+        finally:
+            self._cleanup()
 
     def _setup_socket(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+        with self._resources_lock:
+            # 先保存引用；后续任一步失败时，run() 的 finally/异常分支都能关闭它。
+            self._sock = sock
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
 
-        # ★ Windows 关键：只设 SO_REUSEADDR，绝不设 SO_REUSEPORT
-        if sys.platform.startswith("win32"):
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        elif sys.platform == "darwin":
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        elif hasattr(socket, "SO_REUSEPORT"):
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError:
+            # ★ Windows 关键：只设 SO_REUSEADDR，绝不设 SO_REUSEPORT
+            if sys.platform.startswith("win32"):
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        else:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            elif sys.platform == "darwin":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            elif hasattr(socket, "SO_REUSEPORT"):
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except OSError:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            else:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # 对每块网卡都加入多播组 + 建 sender
-        self._ips = list_local_ips()
-        for ip, _mask in self._ips:
-            mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton(ip)
-            try:
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-                self._senders.append(_MulticastSender(ip))
-                log.debug("已加入多播组，接口 %s", ip)
-            except OSError as e:
-                log.debug("接口 %s 加入多播组失败: %s", ip, e)
+            # 对每块网卡都加入多播组 + 建 sender
+            self._ips = list_local_ips()
+            for ip, _mask in self._ips:
+                mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton(ip)
+                try:
+                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                    self._senders.append(_MulticastSender(ip))
+                    log.debug("已加入多播组，接口 %s", ip)
+                except OSError as e:
+                    log.debug("接口 %s 加入多播组失败: %s", ip, e)
 
-        sock.bind(("0.0.0.0", SSDP_PORT))
-        sock.settimeout(1.0)
-        self._sock = sock
+            sock.bind(("0.0.0.0", SSDP_PORT))
+            sock.settimeout(1.0)
 
     # ------------------------------------------------------------------ #
     # 收包处理
@@ -289,14 +301,20 @@ class SsdpListener(threading.Thread):
     # 主动广播 NOTIFY alive / byebye
     # ------------------------------------------------------------------ #
     def _notify_alive(self) -> None:
-        for st in self._st_list:
-            packet = self._build_notify(st, alive=True)
-            for sender in self._senders:
-                # LOCATION 里的 IP 用 sender 绑定的网卡 IP
-                p = packet.replace(b"{{IP}}", sender.ip.encode())
-                sender.send(p)
+        with self._resources_lock:
+            # stop() 可能在本线程通过 while 条件后先获得锁、发送 byebye
+            # 并 clear。取得锁后必须复查，禁止 byebye 之后再次广播 alive。
+            if not self._running.is_set():
+                return
+            for st in self._st_list:
+                packet = self._build_notify(st, alive=True)
+                for sender in self._senders:
+                    # LOCATION 里的 IP 用 sender 绑定的网卡 IP
+                    p = packet.replace(b"{{IP}}", sender.ip.encode())
+                    sender.send(p)
+            sender_count = len(self._senders)
         log.debug("已多播 NOTIFY alive（%d 个 ST × %d 个网卡）",
-                  len(self._st_list), len(self._senders))
+                  len(self._st_list), sender_count)
 
     def _build_notify(self, st: str, alive: bool) -> bytes:
         usn = f"uuid:{self._uuid}::{st}" if st.startswith("urn:") or st == "upnp:rootdevice" else f"uuid:{self._uuid}"
@@ -319,36 +337,59 @@ class SsdpListener(threading.Thread):
     # ------------------------------------------------------------------ #
     # 生命周期
     # ------------------------------------------------------------------ #
-    def stop(self) -> None:
+    def wait_until_ready(self, timeout: float = SSDP_START_TIMEOUT) -> None:
+        """等待 socket 初始化完成，并把监听线程内的启动失败同步给调用方。"""
+        if not self._startup_done.wait(timeout):
+            raise TimeoutError(f"SsdpListener 启动超过 {timeout:g} 秒仍未就绪")
+        if self._startup_error is not None:
+            raise RuntimeError("SSDP listener 启动失败") from self._startup_error
+        if not self.is_alive():
+            raise RuntimeError("SsdpListener 启动后意外退出")
+
+    def stop(self, timeout: float = SSDP_STOP_TIMEOUT) -> None:
         log.info("停止 SsdpListener")
-        self._running.clear()
-        # 发个空包唤醒阻塞的 recvfrom（虽然 settimeout(1) 会自己醒，保险起见）
-        try:
-            wake = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            wake.sendto(b"\r\n", ("127.0.0.1", SSDP_PORT))
-            wake.close()
-        except OSError:
-            pass
-        # 广播 byebye
-        try:
+        # sender 的 byebye 发送和监听线程的 _cleanup 共用同一把锁，保证
+        # socket 不会在 sendto 过程中被另一线程关闭。
+        with self._resources_lock:
             for st in self._st_list:
                 packet = self._build_notify(st, alive=False)
                 for sender in self._senders:
                     sender.send(packet.replace(b"{{IP}}", sender.ip.encode()))
-        except Exception:  # noqa: BLE001
+            self._running.clear()
+
+        # 发个空包唤醒阻塞的 recvfrom（虽然 settimeout(1) 会自己醒，保险起见）
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as wake:
+                wake.sendto(b"\r\n", ("127.0.0.1", SSDP_PORT))
+        except OSError:
             pass
 
+        if self.ident is not None and threading.current_thread() is not self:
+            self.join(timeout)
+            if self.is_alive():
+                raise TimeoutError(f"SsdpListener 停止超过 {timeout:g} 秒仍未退出")
+
     def _cleanup(self) -> None:
-        for ip, _ in self._ips:
-            mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton(ip)
-            try:
-                assert self._sock is not None
-                self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
-            except OSError:
-                pass
-        for s in self._senders:
-            s.close()
-        if self._sock is not None:
-            self._sock.close()
-            self._sock = None
+        with self._resources_lock:
+            for ip, _ in self._ips:
+                mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton(ip)
+                try:
+                    if self._sock is not None:
+                        self._sock.setsockopt(
+                            socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq,
+                        )
+                except OSError:
+                    pass
+            for sender in self._senders:
+                try:
+                    sender.close()
+                except OSError:
+                    pass
+            self._senders.clear()
+            if self._sock is not None:
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+                self._sock = None
         log.debug("SsdpListener 已清理 socket")
