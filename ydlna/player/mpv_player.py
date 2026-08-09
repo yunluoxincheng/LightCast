@@ -9,9 +9,10 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 from ..logger import get_logger
 
@@ -53,7 +54,14 @@ def import_error() -> Optional[str]:
 
 
 class PlayerSignals(QObject):
-    """从 mpv 事件线程 marshal 到 Qt 主线程的信号集合。"""
+    """从 mpv 事件线程显式投递到 Qt 主线程的信号集合。
+
+    python-mpv 的回调来自普通 Python 工作线程。不能依赖 public signal 连接到
+    Python function/lambda 时的隐式 AutoConnection 语义；所有工作线程事件先走
+    ``_eventQueued``，再由属于创建线程的 ``@Slot`` 统一转发公开信号。
+    """
+
+    _eventQueued = Signal(str, object, int)
 
     # 当前播放位置（秒）。value=None 表示无媒体
     positionChanged = Signal(object)  # float | None
@@ -76,6 +84,57 @@ class PlayerSignals(QObject):
     # 网络缓冲状态变化（paused-for-cache）：True=正在缓冲
     bufferingChanged = Signal(bool)
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._active = False
+        self._generation = 0
+        self._eventQueued.connect(
+            self._dispatch,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def activate(self) -> int:
+        """开始一个新的 mpv 实例信号世代，返回世代编号。"""
+        self._generation += 1
+        self._active = True
+        return self._generation
+
+    def deactivate(self) -> None:
+        """使已排队及之后到达的当前世代事件全部失效。"""
+        self._active = False
+        self._generation += 1
+
+    def post(self, event: str, payload: object, generation: int) -> None:
+        """可从任意线程调用；实际 public signal 只在本 QObject 线程发射。"""
+        self._eventQueued.emit(event, payload, generation)
+
+    @Slot(str, object, int)
+    def _dispatch(self, event: str, payload: object, generation: int) -> None:
+        if not self._active or generation != self._generation:
+            return
+        if event == "position":
+            self.positionChanged.emit(payload)
+        elif event == "duration":
+            self.durationChanged.emit(payload)
+        elif event == "state":
+            self.stateChanged.emit(str(payload))
+        elif event == "media":
+            title, url = payload
+            self.mediaChanged.emit(str(title), str(url))
+        elif event == "ended":
+            self.ended.emit()
+        elif event == "volume":
+            self.volumeChanged.emit(int(payload))
+        elif event == "mute":
+            self.muteChanged.emit(bool(payload))
+        elif event == "error":
+            self.errorOccurred.emit(str(payload))
+        elif event == "playback_failed":
+            title, detail = payload
+            self.playbackFailed.emit(str(title), str(detail))
+        elif event == "buffering":
+            self.bufferingChanged.emit(bool(payload))
+
 
 class Player:
     """libmpv 播放器封装（不创建窗口，需要外部提供 wid）。
@@ -95,6 +154,11 @@ class Player:
                 "请将 mpv-2.dll 放入 bin/ 目录（详见 README）。"
             )
         self.signals = PlayerSignals()
+        # mpv property/event callback 运行在 MPVEventHandlerThread，UI/DLNA 则从
+        # Qt 线程读取缓存。所有缓存字段共用一把锁，它也构成回调检查的 shutdown 屏障。
+        self._state_lock = threading.RLock()
+        self._shutting_down = False
+        self._signal_generation = 0
         self._mpv = None  # 延迟到 attach 时创建
         self._attached = False
         self._title: str = ""
@@ -120,8 +184,10 @@ class Player:
     # ------------------------------------------------------------------ #
     def attach(self, wid: int) -> None:
         """把 mpv 嵌入指定窗口句柄（HWND）。只能在主线程调用。"""
-        if self._attached:
-            return
+        with self._state_lock:
+            if self._attached:
+                return
+            self._shutting_down = False
         log.info("创建 mpv 实例，wid=%s", wid)
         self._mpv = mpv.MPV(
             wid=str(wid),
@@ -143,37 +209,62 @@ class Player:
             log_handler=self._mpv_log_handler,
             loglevel="info",
         )
+        signal_generation = self.signals.activate()
+        with self._state_lock:
+            self._signal_generation = signal_generation
         self._register_callbacks()
         # 应用初始音量/倍速/音频设备
+        with self._state_lock:
+            volume = self._volume
+            muted = self._muted
+            speed = self._speed
+            audio_device = self._audio_device
         try:
-            self._mpv.volume = self._volume
-            self._mpv.mute = self._muted
-            self._mpv.speed = self._speed
+            self._mpv.volume = volume
+            self._mpv.mute = muted
+            self._mpv.speed = speed
             # 直播流重载上限：新版 ffmpeg 把 HLS max_reload 从 1000 降到 3，
             # 直播播放列表刷新稍慢就会提前退出（"Failed to reload playlist"）；
             # 调回 1000。失败不影响启动（属性写入偶尔会因时机失败）
             self._mpv.demuxer_lavf_o = ["max_reload=1000"]
-            if self._audio_device:
-                self._mpv.audio_device = self._audio_device
+            if audio_device:
+                self._mpv.audio_device = audio_device
         except Exception as e:  # 属性写入偶尔会因时机失败，忽略
             log.debug("设置初始属性失败: %s", e)
-        self._attached = True
+        with self._state_lock:
+            self._attached = True
         self._set_state("idle")
 
     def shutdown(self) -> None:
-        """销毁 mpv 实例。"""
-        if self._mpv is None:
+        """阻止晚到回调写状态，并等待 mpv 事件线程退出后销毁实例。"""
+        with self._state_lock:
+            self._shutting_down = True
+            instance = self._mpv
+            # 先切断对外可见性，使主线程上的晚到操作不再访问正在销毁的 mpv。
+            self._mpv = None
+            self._attached = False
+            self._loading = False
+            self._buffering = False
+        # 先让已排队事件失效；terminate() 期间或返回后的晚到回调也会因
+        # generation/shutdown 双重屏障而无法触达公开信号。
+        self.signals.deactivate()
+        if instance is None:
             return
         try:
-            self._mpv.terminate()
+            # python-mpv 的 terminate() 会 join MPVEventHandlerThread；标志已在
+            # 调用前置位，因此终止过程中产生的回调只能观察到 shutting_down。
+            instance.terminate()
         except Exception as e:
             log.warning("mpv terminate 失败: %s", e)
-        self._mpv = None
-        self._attached = False
 
     @property
     def available(self) -> bool:
-        return self._attached and self._mpv is not None
+        with self._state_lock:
+            return (
+                not self._shutting_down
+                and self._attached
+                and self._mpv is not None
+            )
 
     # ------------------------------------------------------------------ #
     # mpv 日志接入
@@ -189,7 +280,9 @@ class Player:
                 # 记录关键组件的错误细节（用于失败提示）；
                 # 排除解码器噪声（aac/video 的包损坏告警对定位没帮助）
                 if component in ("lavf", "ffmpeg/demuxer", "cplayer", "vd", "ad"):
-                    self._last_error = message.strip()
+                    with self._state_lock:
+                        if not self._shutting_down:
+                            self._last_error = message.strip()
             elif loglevel == "warn":
                 log.warning("[mpv/%s] %s", component, message.strip())
             else:
@@ -200,9 +293,9 @@ class Player:
     # ------------------------------------------------------------------ #
     # 回调注册（mpv 事件线程 → Qt 信号）
     #
-    # python-mpv 的回调运行在它自己的事件线程。Qt 跨线程信号在 AutoConnection
-    # 下走 QueuedConnection，需接收方线程（主线程）有事件循环——qasync 提供。
-    # 实测从普通 Python 线程直接 emit 可正常投递到主线程，故此处直接 emit。
+    # python-mpv 的回调运行在它自己的事件线程。这里只更新加锁缓存并调用
+    # PlayerSignals.post()；显式 QueuedConnection + @Slot dispatcher 负责在 Qt
+    # 主线程发射公开信号，普通 Python function/lambda 接收者也不会落到 mpv 线程。
     # ------------------------------------------------------------------ #
     def _register_callbacks(self) -> None:
         m = self._mpv
@@ -210,51 +303,85 @@ class Player:
         @m.property_observer("time-pos")
         def _on_time_pos(_name, value):  # noqa: ANN001
             log.debug("obs time-pos=%s", value)
-            self._position = value
-            self.signals.positionChanged.emit(value)
+            with self._state_lock:
+                if self._shutting_down:
+                    return
+                self._position = value
+                generation = self._signal_generation
+            self.signals.post("position", value, generation)
 
         @m.property_observer("duration")
         def _on_duration(_name, value):  # noqa: ANN001
             log.debug("obs duration=%s", value)
-            self._duration = value
-            self.signals.durationChanged.emit(value)
+            with self._state_lock:
+                if self._shutting_down:
+                    return
+                self._duration = value
+                generation = self._signal_generation
+            self.signals.post("duration", value, generation)
 
         @m.property_observer("pause")
         def _on_pause(_name, value):  # noqa: ANN001
-            if value:
-                self._set_state("paused")
-            elif self._state != "idle":
-                self._set_state("playing")
+            with self._state_lock:
+                if self._shutting_down:
+                    return
+                if value:
+                    self._set_state("paused")
+                elif self._state != "idle":
+                    self._set_state("playing")
 
         @m.property_observer("paused-for-cache")
         def _on_cache(_name, value):  # noqa: ANN001
             """网络缓冲中（等待缓存）→ 通知 UI 显示缓冲动画。"""
-            self._buffering = bool(value)
-            self.signals.bufferingChanged.emit(self._buffering)
+            with self._state_lock:
+                if self._shutting_down:
+                    return
+                self._buffering = bool(value)
+                buffering = self._buffering
+                generation = self._signal_generation
+            self.signals.post("buffering", buffering, generation)
 
         @m.property_observer("volume")
         def _on_volume(_name, value):  # noqa: ANN001
             if value is not None:
-                self._volume = int(value)
-                self.signals.volumeChanged.emit(self._volume)
+                with self._state_lock:
+                    if self._shutting_down:
+                        return
+                    self._volume = int(value)
+                    volume = self._volume
+                    generation = self._signal_generation
+                self.signals.post("volume", volume, generation)
 
         @m.property_observer("mute")
         def _on_mute(_name, value):  # noqa: ANN001
-            self._muted = bool(value)
-            self.signals.muteChanged.emit(self._muted)
+            with self._state_lock:
+                if self._shutting_down:
+                    return
+                self._muted = bool(value)
+                muted = self._muted
+                generation = self._signal_generation
+            self.signals.post("mute", muted, generation)
 
         @m.property_observer("idle-active")
         def _on_idle(_name, value):  # noqa: ANN001
             if value:
-                self._set_state("idle")
+                with self._state_lock:
+                    if self._shutting_down:
+                        return
+                    self._set_state("idle")
 
         @m.event_callback("file-loaded")
         def _on_file_loaded(_event):  # noqa: ANN001
-            log.info("媒体已装载: %s", self._url)
-            self._load_ok = True
-            self._loading = False
-            self._set_state("playing")
-            self.signals.mediaChanged.emit(self._title or self._url, self._url)
+            with self._state_lock:
+                if self._shutting_down:
+                    return
+                log.info("媒体已装载: %s", self._url)
+                self._load_ok = True
+                self._loading = False
+                self._set_state("playing")
+                media = (self._title or self._url, self._url)
+                generation = self._signal_generation
+            self.signals.post("media", media, generation)
 
         @m.event_callback("end-file")
         def _on_end_file(event):  # noqa: ANN001
@@ -266,21 +393,32 @@ class Player:
                     reason = event["event"]["reason"]
                 except (TypeError, KeyError):
                     pass
-            log.info("媒体结束 (reason=%s)", reason)
-            self._position = None
-            self._loading = False
-            self._set_state("idle")
-            # mpv end-file reason: 0=EOF 2=STOP 3=QUIT 4=ERROR 5=REDIRECT
-            # 播放失败（ERROR，或从未装载成功就结束）→ 上报友好提示
-            if reason == 4 or (not self._load_ok and reason not in (2, 3)):
-                detail = self._last_error
-                self._last_error = ""
-                self.signals.playbackFailed.emit(self._title, detail)
-            self.signals.ended.emit()
+            with self._state_lock:
+                if self._shutting_down:
+                    return
+                log.info("媒体结束 (reason=%s)", reason)
+                self._position = None
+                self._loading = False
+                self._set_state("idle")
+                # mpv end-file reason: 0=EOF 2=STOP 3=QUIT 4=ERROR 5=REDIRECT
+                # 播放失败（ERROR，或从未装载成功就结束）→ 上报友好提示
+                if reason == 4 or (not self._load_ok and reason not in (2, 3)):
+                    detail = self._last_error
+                    self._last_error = ""
+                    failed = (self._title, detail)
+                else:
+                    failed = None
+                generation = self._signal_generation
+            if failed is not None:
+                self.signals.post("playback_failed", failed, generation)
+            self.signals.post("ended", None, generation)
 
         @m.event_callback("start-file")
         def _on_start_file(_event):  # noqa: ANN001
-            log.debug("开始播放文件")
+            with self._state_lock:
+                if self._shutting_down:
+                    return
+                log.debug("开始播放文件")
 
     # ------------------------------------------------------------------ #
     # 播放控制（主线程调用）
@@ -290,11 +428,12 @@ class Player:
         if not self.available:
             log.error("mpv 未就绪，无法播放")
             return
-        self._url = url
-        self._title = title
-        self._load_ok = False
-        self._last_error = ""
-        self._loading = True
+        with self._state_lock:
+            self._url = url
+            self._title = title
+            self._load_ok = False
+            self._last_error = ""
+            self._loading = True
         log.info("播放: title=%r url=%s", title, url)
         self._mpv.play(url)
 
@@ -303,8 +442,9 @@ class Player:
         if not self.available:
             log.error("mpv 未就绪，无法播放")
             return
-        self._url = path
-        self._title = title
+        with self._state_lock:
+            self._url = path
+            self._title = title
         log.info("播放本地 m3u8: title=%r path=%s", title, path)
         self._mpv.play(path)
 
@@ -346,7 +486,8 @@ class Player:
         """设置播放倍速（0.25 ~ 4.0）。"""
         speed = max(0.25, min(4.0, float(speed)))
         if not self.available:
-            self._speed = speed
+            with self._state_lock:
+                self._speed = speed
             return
         try:
             self._mpv.speed = speed
@@ -356,7 +497,8 @@ class Player:
     def set_volume(self, volume: int) -> None:
         volume = max(0, min(100, int(volume)))
         if not self.available:
-            self._volume = volume
+            with self._state_lock:
+                self._volume = volume
             return
         try:
             self._mpv.volume = volume
@@ -365,7 +507,8 @@ class Player:
 
     def set_mute(self, muted: bool) -> None:
         if not self.available:
-            self._muted = muted
+            with self._state_lock:
+                self._muted = muted
             return
         try:
             self._mpv.mute = muted
@@ -389,16 +532,19 @@ class Player:
     def get_audio_device(self) -> str:
         """当前音频输出设备名（"" = 默认）。"""
         if not self.available:
-            return self._audio_device
+            with self._state_lock:
+                return self._audio_device
         try:
             return str(self._mpv.audio_device or "")
         except Exception:  # noqa: BLE001
-            return self._audio_device
+            with self._state_lock:
+                return self._audio_device
 
     def set_audio_device(self, name: str) -> None:
         """设置音频输出设备（name="" 表示默认/自动）。"""
         name = name or ""
-        self._audio_device = name
+        with self._state_lock:
+            self._audio_device = name
         if not self.available:
             return
         try:
@@ -411,40 +557,52 @@ class Player:
     # 状态查询（供 DLNA 层用，缓存值，线程安全）
     # ------------------------------------------------------------------ #
     def get_position(self) -> Optional[float]:
-        return self._position
+        with self._state_lock:
+            return self._position
 
     def get_duration(self) -> Optional[float]:
-        return self._duration
+        with self._state_lock:
+            return self._duration
 
     def get_state(self) -> str:
-        return self._state
+        with self._state_lock:
+            return self._state
 
     def get_loading(self) -> bool:
         """是否正在装载媒体（play() 之后、file-loaded 之前）。"""
-        return self._loading
+        with self._state_lock:
+            return self._loading
 
     def get_buffering(self) -> bool:
         """是否正在网络缓冲（paused-for-cache）。"""
-        return self._buffering
+        with self._state_lock:
+            return self._buffering
 
     def get_title(self) -> str:
-        return self._title
+        with self._state_lock:
+            return self._title
 
     def get_url(self) -> str:
-        return self._url
+        with self._state_lock:
+            return self._url
 
     def get_volume(self) -> int:
-        return self._volume
+        with self._state_lock:
+            return self._volume
 
     def get_speed(self) -> float:
-        return self._speed
+        with self._state_lock:
+            return self._speed
 
     def is_muted(self) -> bool:
-        return self._muted
+        with self._state_lock:
+            return self._muted
 
     # ------------------------------------------------------------------ #
     def _set_state(self, state: str) -> None:
-        if state == self._state:
-            return
-        self._state = state
-        self.signals.stateChanged.emit(state)
+        with self._state_lock:
+            if self._shutting_down or state == self._state:
+                return
+            self._state = state
+            generation = self._signal_generation
+        self.signals.post("state", state, generation)

@@ -89,7 +89,7 @@ qfluentwidgets 的 `MessageBox.exec()`（嵌套事件循环 + acrylic 特效）�
 
 ### 2.8 设置页会撑大窗口最小高度
 
-设置页内容纵向堆叠（约 1000px）会撑大窗口 `minimumSizeHint`，导致窗口无法缩小。**内容包进 `ScrollArea` 滚动区**，窗口最小高度即解放。改窗口默认尺寸时记得升 `window_geometry_vN` 配置标记，否则旧几何会覆盖新默认。
+设置页内容纵向堆叠（约 1000px）会撑大窗口 `minimumSizeHint`，导致窗口无法缩小。**内容包进 `ScrollArea` 滚动区**，窗口最小高度即解放。当前默认窗口基准统一为 `1200×800`，`window_geometry_v7` 只负责首次迁移；迁移后继续保存用户通过拖拽边框调整的尺寸和位置。
 
 ### 2.9 流媒体代理层（`hls_rewriter.py`）
 
