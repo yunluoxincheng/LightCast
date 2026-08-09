@@ -7,13 +7,36 @@ name: Build & Release
 #      Artifacts 里（方便发布前试包）
 
 on:
+  pull_request:
+    branches:
+      - master
   push:
     tags:
       - "v*"
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run security regression tests
+        run: python -m pytest -q
+
   build:
+    if: github.event_name != 'pull_request'
+    needs: test
     runs-on: windows-latest
     permissions:
       contents: write # 允许创建 Release

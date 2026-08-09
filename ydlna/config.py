@@ -42,9 +42,10 @@ DEFAULTS: dict[str, Any] = {
     # 是否已提示过「关闭即最小化到托盘」
     "minimize_hint_shown": False,
     # 投屏 URL 是否允许指向内网私有地址（NAS 等）。
-    # 默认关：挡住「借投屏让本机访问内网/本机服务」的 SSRF。
-    # 需要给内网 NAS 投屏的用户可在设置中开启。
-    "allow_intranet_cast": False,
+    # 默认开：DLNA 投屏本就是同局域网场景（VLC/相册常开 192.168.x.x 本地 server），
+    # 默认挡会破坏正常功能。loopback/link-local/云元数据由 url_guard 始终拦截，
+    # 与此配置无关——即开启此选项仍堵 SSRF 最危险路径（本机服务/云元数据）。
+    "allow_intranet_cast": True,
 }
 
 

@@ -167,10 +167,6 @@ def download_dir() -> Path:
 # --------------------------------------------------------------------------- #
 # 校验锚点：校验和只从 GitHub 官方（直连 HTTPS）取，绝不经加速镜像。
 # 下载本身可走镜像提速，但落地后必须用此校验和验证，不通过则拒绝安装。
-class ChecksumError(RuntimeError):
-    """更新包完整性校验失败或缺少校验信息。"""
-
-
 async def _fetch_sha256(sums_url: str, filename: str) -> Optional[str]:
     """从 GitHub 直连下载 SHA256SUMS.txt，解析出指定文件名的哈希。
 

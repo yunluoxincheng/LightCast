@@ -31,7 +31,7 @@
 ### 🔴 C1. 自动更新无任何完整性校验，第三方镜像可篡改安装包（供应链 RCE）
 
 - **文件**：`ydlna/updater.py:38-42, 190-227, 391-449`；`.github/workflows/release.yml`
-- **状态**：`[x]` 已修复（2026-08-09）：Release 附 `SHA256SUMS.txt`；客户端只从 GitHub API 直连取校验和，下载（可经镜像）落地后强制 `hashlib.sha256` 比对，不匹配/缺失则拒绝安装。
+- **状态**：`[x]` 新客户端已修复（2026-08-09）：Release 附 `SHA256SUMS.txt`；客户端只从 GitHub API 直连取校验和，下载（可经镜像）落地后强制 `hashlib.sha256` 比对，不匹配/缺失则拒绝安装。该保护无法追溯到已经安装的旧 updater；从旧版本迁移到首个安全版本时，必须从 GitHub Releases 手动下载安装一次，并在 Release Notes 中明确提示。
 - **问题**：
   - `run_update_flow` 下载完 `LightCast-Setup-<ver>.exe` 后直接 `os.startfile(dest)` 执行，
     **无 SHA-256 / 签名校验**。
@@ -52,7 +52,7 @@
 
 - **文件**：`ydlna/player/hls_rewriter.py:304-329, 331-393, 472-553, 594-714`；
   `ydlna/dlna/renderer_bridge.py:152-200`
-- **状态**：`[x]` 已修复（2026-08-09）：新增 `ydlna/player/_url_guard.py`（scheme 白名单 + DNS 解析后 IP 黑名单 + 关重定向由 aiohttp 默认行为 + 每跳未单独校验，见说明）；投屏入口、m3u8 内分片/密钥/初始化段 URL 均过校验；设置页「允许内网投屏源」开关（默认关）。
+- **状态**：`[x]` 已修复（2026-08-09）：仅允许 http/https；所有上游请求关闭自动重定向并逐跳校验；`SSRFSafeConnector` 在 aiohttp 连接解析阶段过滤实际候选 IP，使校验结果与建连使用同一批地址；安全拒绝统一抛 `UrlBlockedError`，mpv 只接收本地代理 URL，不再存在原链 fallback。设置页「允许内网投屏源」默认开以兼容 DLNA 私网媒体，但回环、link-local、云元数据、未指定和多播地址始终拒绝。
 - **问题**：投屏来的 URL（`SetAVTransportURI`）在 `_get` / `_forward_url` 里直接
   `session.get(url)`，**无任何校验**：
   - 无 scheme 白名单（仅靠 aiohttp 间接挡 `file://`，非显式）。
@@ -73,8 +73,8 @@
 
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
-- **文件**：`tests/`（空目录）；`.github/workflows/release.yml`
-- **状态**：`[ ]` （本次修复用了独立验证脚本核验 `_url_guard` / updater 逻辑，但未沉淀为正式测试套件，留给后续会话补 C3）
+- **文件**：`tests/`；`.github/workflows/release.yml`
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-09）：50 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制与更新 SHA-256；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -95,7 +95,7 @@
 ### H1. 代理 DoS 面：无上限读取 / 解压炸弹 / 无限缓存 / 慢速攻击
 
 - **文件**：`ydlna/player/hls_rewriter.py:771, 494, 825, 923, 631-637, 704-709, 410-411, 345, 261`
-- **状态**：`[x]` 部分修复（2026-08-09）：m3u8/密钥/探测读取加硬上限；PIL `MAX_IMAGE_PIXELS` 收紧；`_jpeg_cache` 加 LRU。**未修**：`_forward_url` 流式转发的超时与 `TCPConnector(limit_per_host)`（见 M6，留后续）。
+- **状态**：`[x]` 部分修复（2026-08-09）：m3u8/密钥/探测读取加硬上限；AES key 多读 1 字节并要求恰好 16 字节；PIL `MAX_IMAGE_PIXELS` 收紧为 4096² 且把 `DecompressionBombWarning` 提升为异常；`_jpeg_cache` 加 LRU；连接器限制为总 64 / 单 host 16。**未修**：`_forward_url` 流式转发的独立 `sock_read` 超时（见 M6，留后续）。
 - **问题**：
   - **OOM**：m3u8（`:771`）、AES 密钥（`:494`）、探测（`:825/923`）三处 `await resp.read()`
     **无大小上限**（只有 hybrid / image / direct 走的 `_read_capped` 有 96MB 上限）。恶意上游可让进程 OOM。
@@ -107,7 +107,7 @@
 - **建议**：
   - m3u8 / 密钥 / 探测统一走带硬上限的读取（m3u8 给 1MB；密钥读 16 字节后停；探测用
     `resp.content.read(65536)` 并检查后续是否还有大量数据）。
-  - 显式 `Image.MAX_IMAGE_PIXELS`（如 4096×4096×4），捕获 `DecompressionBombError`。
+  - 显式 `Image.MAX_IMAGE_PIXELS`（如 4096×4096 像素），并把 `DecompressionBombWarning` 也按错误处理。
   - `_jpeg_cache` 加 LRU 上限（如 16）。
   - session 用 `TCPConnector(limit=64, limit_per_host=16)`；转发请求用
     `ClientTimeout(total=None, connect=10, sock_read=30)`。

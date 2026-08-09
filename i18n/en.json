@@ -94,7 +94,7 @@
   "settings.update_mirror": "Mirror acceleration",
   "settings.update_mirror.hint": "Probe direct & mirror sources in parallel and download from the fastest (mirrors are third-party proxies)",
   "settings.allow_intranet_cast": "Allow intranet cast sources",
-  "settings.allow_intranet_cast.hint": "By default, casts pointing to intranet addresses are blocked to prevent SSRF. Enable this if you cast from a LAN device such as a NAS.",
+  "settings.allow_intranet_cast.hint": "On by default — allows casts to LAN addresses (NAS / local media). Loopback and cloud-metadata addresses are always blocked to prevent SSRF.",
   "settings.check_update": "Check for updates",
   "settings.check_update.checking": "Checking…",
   "settings.check_update.up_to_date": "You are up to date",

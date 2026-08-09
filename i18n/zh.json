@@ -94,7 +94,7 @@
   "settings.update_mirror": "更新下载加速",
   "settings.update_mirror.hint": "直连与加速镜像并行探测、自动选最快的源下载（镜像为第三方代理）",
   "settings.allow_intranet_cast": "允许内网投屏源",
-  "settings.allow_intranet_cast.hint": "默认拒绝指向内网地址的投屏以防 SSRF；需要给局域网 NAS 等内网设备投屏时可开启",
+  "settings.allow_intranet_cast.hint": "默认开启，允许投屏指向局域网地址（NAS / 本机媒体）。始终阻止指向本机回环地址与云元数据地址，以防 SSRF",
   "settings.check_update": "检查更新",
   "settings.check_update.checking": "正在检查…",
   "settings.check_update.up_to_date": "已是最新版本",
