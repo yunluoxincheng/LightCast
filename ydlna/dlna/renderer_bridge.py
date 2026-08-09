@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Optional
 from defusedxml import ElementTree as ET  # 安全 XML 解析
 
 from ..logger import get_logger
+from ..player._url_guard import UrlBlockedError, validate_upstream_url
 from ..player.mpv_player import Player
 
 if TYPE_CHECKING:
@@ -129,6 +130,9 @@ class RendererBridge:
         # 投屏到达（SetAVTransportURI）回调：由 app 注入，用于立即切页 + 缓冲动画
         # （不等代理/解码，用户体感秒进播放器页）
         self.on_cast_started = None  # Callable[[], None] | None
+        # 当前活跃的媒体代理（换媒体时先停旧的）
+        self._hls_proxy = None
+        self._direct_proxy = None
         # 连接 player 状态变化，同步到 DLNA TransportState
         self._player.signals.stateChanged.connect(self._on_player_state)
 
@@ -155,10 +159,34 @@ class RendererBridge:
         所有 http(s) 媒体都先过本地代理：
         - m3u8 → HLS 重写代理（分片改名 + 密钥/初始化段转发 + 内容兼容）
         - 直链 → DirectProxy（防盗链头 + 重试 + 内容模式兼容）
-        代理初始化失败时回退直接播放原 URL。
+        mpv 只接收本地代理 URL；代理初始化失败时进入错误状态，不把原始上游 URL
+        直接交给 mpv。否则 mpv 自己的 DNS / 重定向会绕过代理层 SSRF 防护。
+
+        SSRF 防护（三道关）：
+        1. 非 http(s) scheme（file:// / edl:// / data: 等）→ 直接拒绝，不传给 mpv。
+        2. 入口 validate_upstream_url：URL 字面量指向本机/云元数据/（收紧模式下）私网
+           → 抛 UrlBlockedError → 置 ERROR_OCCURRED，绝不 fallback 到 mpv。
+        3. 代理层 setup_*_proxy 内部 + SSRFSafeConnector 连接时再校验（堵 302/rebinding）。
+        普通失败（403/格式/网络）同样不绕过代理层。
         """
         title = parse_title_from_didl(meta) or url
         log.info("桥接: 设置媒体 title=%r url=%s", title, url)
+
+        # 第一道：scheme 白名单
+        if not url.lower().startswith(("http://", "https://")):
+            log.warning("拒绝非 http(s) 投屏 URL（可能尝试读取本地文件）: %s", url)
+            self._set_transport_state("ERROR_OCCURRED")
+            return
+
+        # 第二道：入口安全校验。被拦（UrlBlockedError）→ 直接 ERROR，绝不 fallback。
+        # 在 cb() 之前做：安全拒绝时不该再弹缓冲动画误导用户。
+        allow_intranet = self._allow_intranet()
+        try:
+            validate_upstream_url(url, allow_intranet=allow_intranet)
+        except UrlBlockedError as e:
+            log.warning("投屏 URL 被安全策略拦截: %s（%s）", url, e.reason)
+            self._set_transport_state("ERROR_OCCURRED")
+            return
 
         # 先通知 UI「投屏到达」：立即切到播放器页并显示缓冲动画，
         # 代理/解码在后台进行（用户体感秒进）
@@ -169,16 +197,36 @@ class RendererBridge:
             except Exception as e:  # noqa: BLE001
                 log.debug("on_cast_started 回调异常: %s", e)
 
-        if url.lower().startswith(("http://", "https://")):
-            proxied = await self._setup_proxy(url)
+        try:
+            proxied = await self._setup_proxy(
+                url, allow_intranet=allow_intranet
+            )
             if proxied is not None:
                 log.info("播放代理后的 URL: %s", proxied)
                 self._player.play(proxied, title)
                 return
-            log.warning("代理初始化失败，回退直接播放原 URL")
-        self._player.play(url, title)
+            log.warning("代理初始化失败；为避免绕过 SSRF 防护，不直接播放原始 URL")
+            self._set_transport_state("ERROR_OCCURRED")
+        except UrlBlockedError as e:
+            # 代理层 SSRF 拒绝（分片/密钥/重定向目标命中黑名单）：同样绝不 fallback。
+            log.warning("代理阶段 URL 被安全策略拦截: %s（%s）", url, e.reason)
+            self._set_transport_state("ERROR_OCCURRED")
+        except Exception as e:  # noqa: BLE001  代理/播放失败：回滚状态，避免 UI 不一致
+            log.warning("设置媒体失败: %s", e)
+            self._set_transport_state("ERROR_OCCURRED")
 
-    async def _setup_proxy(self, url: str) -> Optional[str]:
+    def _allow_intranet(self) -> bool:
+        """读取「允许内网投屏源」配置（与 hls_rewriter 一致，默认 True）。"""
+        try:
+            from ..config import Config
+
+            return bool(Config.instance().get("allow_intranet_cast", True))
+        except Exception:  # noqa: BLE001
+            return True
+
+    async def _setup_proxy(
+        self, url: str, *, allow_intranet: bool
+    ) -> Optional[str]:
         """建立本地媒体代理，返回可播放 URL（失败返回 None）。
 
         m3u8 走 HLS 重写代理，其它 http(s) 直链走 DirectProxy；
@@ -190,10 +238,10 @@ class RendererBridge:
             if old is not None and old.running:
                 await old.stop()
         if ".m3u8" in url.lower():
-            proxy = await setup_hls_proxy(url)
+            proxy = await setup_hls_proxy(url, allow_intranet=allow_intranet)
             self._hls_proxy = proxy
         else:
-            proxy = await setup_direct_proxy(url)
+            proxy = await setup_direct_proxy(url, allow_intranet=allow_intranet)
             self._direct_proxy = proxy
         if proxy is None:
             return None

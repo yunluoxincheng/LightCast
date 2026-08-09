@@ -141,6 +141,12 @@ class SettingsInterface(QWidget):
         self.portEdit.setPlaceholderText("0")
         self.portCard.setWidget(self.portEdit)
 
+        # 局域网投屏兼容开关：默认允许私网源；回环/link-local 始终拒绝
+        self.intranetCastCard = _SettingCard(
+            tr("settings.allow_intranet_cast"), tr("settings.allow_intranet_cast.hint"))
+        self.intranetCastSwitch = SwitchButton()
+        self.intranetCastCard.setWidget(self.intranetCastSwitch)
+
         # ---- 关于 ----
         self.aboutTitle = SubtitleLabel(tr("settings.group.about"))
         self.aboutCard = CardWidget(self)
@@ -186,6 +192,7 @@ class SettingsInterface(QWidget):
         root.addWidget(self.autostartCard)
         root.addWidget(self.deviceNameCard)
         root.addWidget(self.portCard)
+        root.addWidget(self.intranetCastCard)
         root.addSpacing(8)
         root.addWidget(self.aboutTitle)
         root.addWidget(self.aboutCard)
@@ -211,6 +218,7 @@ class SettingsInterface(QWidget):
         self.autostartSwitch.setChecked(bool(self._config.get("dlna_enabled", True)))
         self.deviceNameEdit.setText(self._config.get("friendly_name", ""))
         self.portEdit.setText(str(self._config.get("http_port", 0)))
+        self.intranetCastSwitch.setChecked(bool(self._config.get("allow_intranet_cast", True)))
 
     def _reload_audio_devices(self) -> None:
         """重新填充音频输出设备下拉（保留当前选择）。"""
@@ -237,6 +245,7 @@ class SettingsInterface(QWidget):
         self.autostartSwitch.checkedChanged.connect(self._on_autostart_changed)
         self.deviceNameEdit.textChanged.connect(self._on_device_name_changed)
         self.portEdit.textChanged.connect(self._on_port_changed)
+        self.intranetCastSwitch.checkedChanged.connect(self._on_intranet_cast_changed)
         self.githubButton.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_URL)))
 
     # ------------------------------------------------------------------ #
@@ -344,6 +353,10 @@ class SettingsInterface(QWidget):
         except ValueError:
             pass
 
+    def _on_intranet_cast_changed(self, checked: bool) -> None:
+        """投屏 SSRF 防护开关（是否允许指向内网的投屏 URL）。"""
+        self._config.set("allow_intranet_cast", checked)
+
     def showEvent(self, event) -> None:  # noqa: N802, ANN001
         super().showEvent(event)
         # 进入设置页时刷新音频设备列表（设备插拔可能变化）
@@ -376,6 +389,8 @@ class SettingsInterface(QWidget):
         self.deviceNameCard.descLabel.setText(tr("settings.device_name.hint"))
         self.portCard.titleLabel.setText(tr("settings.http_port"))
         self.portCard.descLabel.setText(tr("settings.http_port.hint"))
+        self.intranetCastCard.titleLabel.setText(tr("settings.allow_intranet_cast"))
+        self.intranetCastCard.descLabel.setText(tr("settings.allow_intranet_cast.hint"))
         self.aboutTitle.setText(tr("settings.group.about"))
         self.aboutDesc.setText(tr("settings.about.description"))
         self.aboutLicense.setText(tr("settings.about.license"))

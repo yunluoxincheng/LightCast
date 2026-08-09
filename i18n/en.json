@@ -93,6 +93,8 @@
   "settings.update.hint": "Check GitHub for new versions at startup and offer to install (requires network)",
   "settings.update_mirror": "Mirror acceleration",
   "settings.update_mirror.hint": "Probe direct & mirror sources in parallel and download from the fastest (mirrors are third-party proxies)",
+  "settings.allow_intranet_cast": "Allow intranet cast sources",
+  "settings.allow_intranet_cast.hint": "On by default—allows any reachable private address as a cast source (phone, NAS, etc.); turn it off for strict mode. Loopback, link-local, and cloud-metadata addresses are always blocked.",
   "settings.check_update": "Check for updates",
   "settings.check_update.checking": "Checking…",
   "settings.check_update.up_to_date": "You are up to date",
@@ -106,11 +108,17 @@
   "dialog.update.install": "Install now",
   "dialog.update.later": "Later",
   "dialog.update.failed": "Download failed",
+  "dialog.update.checksum_failed": "Update integrity check failed",
+  "dialog.update.checksum_failed.body": "The downloaded installer failed its integrity check — it may have been tampered with or corrupted during download. It has been deleted. Please retry or download manually from GitHub.",
+  "dialog.update.no_checksum": "Auto-update unavailable for this version",
+  "dialog.update.no_checksum.body": "This Release is missing integrity information (SHA256SUMS.txt), so it will not be auto-installed for safety. Please download the latest version manually from GitHub Releases.",
   "player.error.play_failed": "Failed to play this media",
   "player.error.play_failed.hint": "Check your network connection, or try another quality/source. Details are in the log (lightcast.log).",
   "player.error.hint.forbidden": "The source rejected the request (403/410) — the link may be expired or blocked by hotlink protection. Please re-cast.",
   "player.error.hint.not_found": "The source reported the resource is missing (404) — the link may have expired. Please re-cast.",
   "player.error.hint.key": "Failed to fetch the decryption key — it may be blocked by the source. Try another quality or source.",
   "player.error.hint.invalid": "The media content could not be recognized — the source may have returned an error page. Try another quality or source.",
-  "player.error.hint.network": "Network connection failed or timed out. Check your network and retry."
+  "player.error.hint.network": "Network connection failed or timed out. Check your network and retry.",
+  "error.cast_url_blocked": "Cast URL blocked by safety policy",
+  "error.cast_url_blocked.hint": "The cast URL was blocked by the security policy. Loopback, link-local, cloud-metadata, and other high-risk addresses are always blocked. If \"Allow intranet cast sources\" is disabled, enable it to allow ordinary RFC1918 / ULA private media sources."
 }

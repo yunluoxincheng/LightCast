@@ -41,6 +41,11 @@ DEFAULTS: dict[str, Any] = {
     "window_geometry_v6": False,
     # 是否已提示过「关闭即最小化到托盘」
     "minimize_hint_shown": False,
+    # 投屏 URL 是否允许指向内网私有地址（手机、NAS 等）。
+    # 默认开：DLNA 投屏本就是同局域网场景，默认挡会破坏正常功能。此产品边界也意味着
+    # 任意可达的 RFC1918 / ULA 地址（含路由器、VPN、虚拟网卡网络）均可作为媒体源；
+    # 关闭后进入拒绝私网的严格模式。loopback/link-local/云元数据等地址始终拦截。
+    "allow_intranet_cast": True,
 }
 
 
