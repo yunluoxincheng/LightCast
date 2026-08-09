@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：66 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、后台任务退出清理与 SSDP 线程生命周期；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：69 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、后台任务退出清理与 SSDP 线程生命周期；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -136,7 +136,7 @@
 ### H4. SSDP listener 启停泄漏：线程不 join、socket 竞态
 
 - **文件**：`ydlna/dlna/ssdp_listener.py:322-354`
-- **状态**：`[x]` 已修复（2026-08-10）：listener 用启动事件把 socket 初始化成功/失败同步给 `DlnaServer.async_start()`，服务只有在 SSDP 明确就绪后才标记运行；多播 alive/byebye 与 `_cleanup()` 通过同一资源锁串行操作 sender/socket；`stop()` 发送 byebye、清运行标志、唤醒 `recvfrom` 后执行有界 `join`，线程超时未退出时抛出异常并保留 listener 引用供统一清理链路重试。新增测试覆盖正常退出、部分启动资源清理、启动失败传播和停止超时引用保留。
+- **状态**：`[x]` 已修复（2026-08-10）：listener 用启动事件把 socket 初始化成功/失败同步给 `DlnaServer.async_start()`，服务只有在 SSDP 明确就绪后才标记运行；多播 alive/byebye 与 `_cleanup()` 通过同一资源锁串行操作 sender/socket，alive 取得锁后会复查运行状态，杜绝 byebye 后再次广播；`stop()` 发送 byebye、清运行标志、唤醒 `recvfrom` 后执行有界 `join`，线程超时未退出时抛出异常并保留 listener 引用供统一清理链路重试。同步的启动等待和停止 join 均通过 `asyncio.to_thread()` 执行，不阻塞 qasync/Qt 事件循环。新增测试覆盖正常退出、alive/byebye 竞态、事件循环可调度、部分启动资源清理、启动失败传播和停止超时引用保留。
 - **问题**：
   - `stop()` 只清标志发 byebye，**不 join 线程**，调用方把 `self._ssdp = None` 后旧线程作为
     daemon 残留，反复启停会累积僵尸线程。

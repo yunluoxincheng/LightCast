@@ -141,7 +141,7 @@ class SsdpListener(threading.Thread):
         self._ips: list[tuple[str, str]] = []
         self._resources_lock = threading.RLock()
         self._running = threading.Event()
-        self._running.set()  # 启动后置位，run 循环里检查它
+        self._running.set()  # 初始化为运行状态；stop() 时 clear
         self._startup_done = threading.Event()
         self._startup_error: Exception | None = None
 
@@ -302,6 +302,10 @@ class SsdpListener(threading.Thread):
     # ------------------------------------------------------------------ #
     def _notify_alive(self) -> None:
         with self._resources_lock:
+            # stop() 可能在本线程通过 while 条件后先获得锁、发送 byebye
+            # 并 clear。取得锁后必须复查，禁止 byebye 之后再次广播 alive。
+            if not self._running.is_set():
+                return
             for st in self._st_list:
                 packet = self._build_notify(st, alive=True)
                 for sender in self._senders:

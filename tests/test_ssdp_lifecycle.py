@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from types import SimpleNamespace
 
@@ -70,6 +71,69 @@ def test_ssdp_stop_sends_byebye_joins_thread_and_closes_resources(
     assert receiver.closed is True
     assert sender.closed is True
     assert any(b"NTS: ssdp:byebye" in packet for packet in sender.packets)
+
+
+def test_ssdp_stop_prevents_waiting_alive_after_byebye(monkeypatch) -> None:
+    listener = _listener()
+
+    class Sender:
+        ip = "192.0.2.10"
+
+        def __init__(self) -> None:
+            self.packets: list[bytes] = []
+
+        def send(self, data: bytes) -> None:
+            self.packets.append(data)
+
+        def close(self) -> None:
+            pass
+
+    sender = Sender()
+    listener._senders = [sender]  # type: ignore[list-item]  # noqa: SLF001
+
+    stop_has_lock = threading.Event()
+    release_stop = threading.Event()
+    notify_attempting = threading.Event()
+    errors: list[BaseException] = []
+    original_build_notify = listener._build_notify  # noqa: SLF001
+
+    def gated_build_notify(st: str, alive: bool) -> bytes:
+        if not alive and not stop_has_lock.is_set():
+            stop_has_lock.set()
+            if not release_stop.wait(timeout=1.0):
+                raise TimeoutError("test did not release stop")
+        return original_build_notify(st, alive)
+
+    def run_stop() -> None:
+        try:
+            listener.stop(timeout=1.0)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def run_notify() -> None:
+        notify_attempting.set()
+        try:
+            listener._notify_alive()  # noqa: SLF001
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    monkeypatch.setattr(listener, "_build_notify", gated_build_notify)
+    stop_thread = threading.Thread(target=run_stop)
+    notify_thread = threading.Thread(target=run_notify)
+
+    stop_thread.start()
+    assert stop_has_lock.wait(timeout=1.0)
+    notify_thread.start()
+    assert notify_attempting.wait(timeout=1.0)
+    release_stop.set()
+    stop_thread.join(timeout=1.0)
+    notify_thread.join(timeout=1.0)
+
+    assert not stop_thread.is_alive()
+    assert not notify_thread.is_alive()
+    assert errors == []
+    assert any(b"NTS: ssdp:byebye" in packet for packet in sender.packets)
+    assert not any(b"NTS: ssdp:alive" in packet for packet in sender.packets)
 
 
 def test_ssdp_startup_failure_is_reported_and_partial_resources_are_closed(
@@ -183,6 +247,118 @@ def test_dlna_start_waits_for_ssdp_readiness_and_propagates_failure(
 
     asyncio.run(scenario())
     assert bridge.shutdown_calls == 1
+
+
+def test_dlna_start_ssdp_wait_does_not_block_event_loop(monkeypatch) -> None:
+    entered_wait = threading.Event()
+    release_wait = threading.Event()
+
+    class Config:
+        def get(self, key: str, default=None):  # noqa: ANN001, ANN202
+            values = {
+                "friendly_name": "Test Renderer",
+                "udn": "uuid:test-device",
+                "http_port": 12345,
+            }
+            return values.get(key, default)
+
+    class Bridge:
+        def set_services(self, *_services) -> None:  # noqa: ANN002
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+    class UpnpServer:
+        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+            self._device = SimpleNamespace(services={})
+            self.base_uri = "http://192.0.2.10:12345"
+
+        async def async_start(self) -> None:
+            pass
+
+        async def async_stop(self) -> None:
+            pass
+
+    class SlowListener:
+        def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def wait_until_ready(self) -> None:
+            entered_wait.set()
+            release_wait.wait(timeout=1.0)
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(server_module, "_patch_upnp_server_skip_ssdp", lambda: None)
+    monkeypatch.setattr(server_module, "make_device_class", lambda *_args: object)
+    monkeypatch.setattr(server_module, "UpnpServer", UpnpServer)
+    monkeypatch.setattr(server_module, "SsdpListener", SlowListener)
+
+    server = DlnaServer(Bridge(), Config())  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        start_task = asyncio.create_task(server.async_start())
+        try:
+            for _ in range(50):
+                if entered_wait.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered_wait.is_set()
+            # wait_until_ready 仍在阻塞工作线程，但 asyncio/qasync 可以继续调度。
+            assert not start_task.done()
+        finally:
+            release_wait.set()
+        await start_task
+        await server.async_stop()
+
+    asyncio.run(scenario())
+
+
+def test_dlna_stop_join_does_not_block_event_loop() -> None:
+    entered_stop = threading.Event()
+    release_stop = threading.Event()
+
+    class Listener:
+        def stop(self) -> None:
+            entered_stop.set()
+            release_stop.wait(timeout=1.0)
+
+    class UpnpServer:
+        async def async_stop(self) -> None:
+            pass
+
+    class Bridge:
+        def shutdown(self) -> None:
+            pass
+
+    server = DlnaServer.__new__(DlnaServer)
+    server._running = True
+    server._server = UpnpServer()
+    server._ssdp = Listener()
+    server._bridge = Bridge()
+
+    async def scenario() -> None:
+        stop_task = asyncio.create_task(server.async_stop())
+        try:
+            for _ in range(50):
+                if entered_stop.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered_stop.is_set()
+            # stop/join 仍在阻塞工作线程，但 asyncio/qasync 可以继续调度。
+            assert not stop_task.done()
+        finally:
+            release_stop.set()
+        await stop_task
+
+    asyncio.run(scenario())
+    assert server._ssdp is None
+    assert server._running is False
 
 
 def test_dlna_stop_timeout_preserves_ssdp_reference_for_retry() -> None:
