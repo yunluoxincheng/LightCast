@@ -12,7 +12,7 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 from ..logger import get_logger
 
@@ -54,7 +54,14 @@ def import_error() -> Optional[str]:
 
 
 class PlayerSignals(QObject):
-    """从 mpv 事件线程 marshal 到 Qt 主线程的信号集合。"""
+    """从 mpv 事件线程显式投递到 Qt 主线程的信号集合。
+
+    python-mpv 的回调来自普通 Python 工作线程。不能依赖 public signal 连接到
+    Python function/lambda 时的隐式 AutoConnection 语义；所有工作线程事件先走
+    ``_eventQueued``，再由属于创建线程的 ``@Slot`` 统一转发公开信号。
+    """
+
+    _eventQueued = Signal(str, object, int)
 
     # 当前播放位置（秒）。value=None 表示无媒体
     positionChanged = Signal(object)  # float | None
@@ -76,6 +83,57 @@ class PlayerSignals(QObject):
     playbackFailed = Signal(str, str)
     # 网络缓冲状态变化（paused-for-cache）：True=正在缓冲
     bufferingChanged = Signal(bool)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._active = False
+        self._generation = 0
+        self._eventQueued.connect(
+            self._dispatch,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def activate(self) -> int:
+        """开始一个新的 mpv 实例信号世代，返回世代编号。"""
+        self._generation += 1
+        self._active = True
+        return self._generation
+
+    def deactivate(self) -> None:
+        """使已排队及之后到达的当前世代事件全部失效。"""
+        self._active = False
+        self._generation += 1
+
+    def post(self, event: str, payload: object, generation: int) -> None:
+        """可从任意线程调用；实际 public signal 只在本 QObject 线程发射。"""
+        self._eventQueued.emit(event, payload, generation)
+
+    @Slot(str, object, int)
+    def _dispatch(self, event: str, payload: object, generation: int) -> None:
+        if not self._active or generation != self._generation:
+            return
+        if event == "position":
+            self.positionChanged.emit(payload)
+        elif event == "duration":
+            self.durationChanged.emit(payload)
+        elif event == "state":
+            self.stateChanged.emit(str(payload))
+        elif event == "media":
+            title, url = payload
+            self.mediaChanged.emit(str(title), str(url))
+        elif event == "ended":
+            self.ended.emit()
+        elif event == "volume":
+            self.volumeChanged.emit(int(payload))
+        elif event == "mute":
+            self.muteChanged.emit(bool(payload))
+        elif event == "error":
+            self.errorOccurred.emit(str(payload))
+        elif event == "playback_failed":
+            title, detail = payload
+            self.playbackFailed.emit(str(title), str(detail))
+        elif event == "buffering":
+            self.bufferingChanged.emit(bool(payload))
 
 
 class Player:
@@ -100,6 +158,7 @@ class Player:
         # Qt 线程读取缓存。所有缓存字段共用一把锁，它也构成回调检查的 shutdown 屏障。
         self._state_lock = threading.RLock()
         self._shutting_down = False
+        self._signal_generation = 0
         self._mpv = None  # 延迟到 attach 时创建
         self._attached = False
         self._title: str = ""
@@ -150,6 +209,9 @@ class Player:
             log_handler=self._mpv_log_handler,
             loglevel="info",
         )
+        signal_generation = self.signals.activate()
+        with self._state_lock:
+            self._signal_generation = signal_generation
         self._register_callbacks()
         # 应用初始音量/倍速/音频设备
         with self._state_lock:
@@ -183,6 +245,9 @@ class Player:
             self._attached = False
             self._loading = False
             self._buffering = False
+        # 先让已排队事件失效；terminate() 期间或返回后的晚到回调也会因
+        # generation/shutdown 双重屏障而无法触达公开信号。
+        self.signals.deactivate()
         if instance is None:
             return
         try:
@@ -228,9 +293,9 @@ class Player:
     # ------------------------------------------------------------------ #
     # 回调注册（mpv 事件线程 → Qt 信号）
     #
-    # python-mpv 的回调运行在它自己的事件线程。Qt 跨线程信号在 AutoConnection
-    # 下走 QueuedConnection，需接收方线程（主线程）有事件循环——qasync 提供。
-    # 实测从普通 Python 线程直接 emit 可正常投递到主线程，故此处直接 emit。
+    # python-mpv 的回调运行在它自己的事件线程。这里只更新加锁缓存并调用
+    # PlayerSignals.post()；显式 QueuedConnection + @Slot dispatcher 负责在 Qt
+    # 主线程发射公开信号，普通 Python function/lambda 接收者也不会落到 mpv 线程。
     # ------------------------------------------------------------------ #
     def _register_callbacks(self) -> None:
         m = self._mpv
@@ -242,7 +307,8 @@ class Player:
                 if self._shutting_down:
                     return
                 self._position = value
-                self.signals.positionChanged.emit(value)
+                generation = self._signal_generation
+            self.signals.post("position", value, generation)
 
         @m.property_observer("duration")
         def _on_duration(_name, value):  # noqa: ANN001
@@ -251,7 +317,8 @@ class Player:
                 if self._shutting_down:
                     return
                 self._duration = value
-                self.signals.durationChanged.emit(value)
+                generation = self._signal_generation
+            self.signals.post("duration", value, generation)
 
         @m.property_observer("pause")
         def _on_pause(_name, value):  # noqa: ANN001
@@ -270,7 +337,9 @@ class Player:
                 if self._shutting_down:
                     return
                 self._buffering = bool(value)
-                self.signals.bufferingChanged.emit(self._buffering)
+                buffering = self._buffering
+                generation = self._signal_generation
+            self.signals.post("buffering", buffering, generation)
 
         @m.property_observer("volume")
         def _on_volume(_name, value):  # noqa: ANN001
@@ -279,7 +348,9 @@ class Player:
                     if self._shutting_down:
                         return
                     self._volume = int(value)
-                    self.signals.volumeChanged.emit(self._volume)
+                    volume = self._volume
+                    generation = self._signal_generation
+                self.signals.post("volume", volume, generation)
 
         @m.property_observer("mute")
         def _on_mute(_name, value):  # noqa: ANN001
@@ -287,7 +358,9 @@ class Player:
                 if self._shutting_down:
                     return
                 self._muted = bool(value)
-                self.signals.muteChanged.emit(self._muted)
+                muted = self._muted
+                generation = self._signal_generation
+            self.signals.post("mute", muted, generation)
 
         @m.property_observer("idle-active")
         def _on_idle(_name, value):  # noqa: ANN001
@@ -306,7 +379,9 @@ class Player:
                 self._load_ok = True
                 self._loading = False
                 self._set_state("playing")
-                self.signals.mediaChanged.emit(self._title or self._url, self._url)
+                media = (self._title or self._url, self._url)
+                generation = self._signal_generation
+            self.signals.post("media", media, generation)
 
         @m.event_callback("end-file")
         def _on_end_file(event):  # noqa: ANN001
@@ -330,8 +405,13 @@ class Player:
                 if reason == 4 or (not self._load_ok and reason not in (2, 3)):
                     detail = self._last_error
                     self._last_error = ""
-                    self.signals.playbackFailed.emit(self._title, detail)
-                self.signals.ended.emit()
+                    failed = (self._title, detail)
+                else:
+                    failed = None
+                generation = self._signal_generation
+            if failed is not None:
+                self.signals.post("playback_failed", failed, generation)
+            self.signals.post("ended", None, generation)
 
         @m.event_callback("start-file")
         def _on_start_file(_event):  # noqa: ANN001
@@ -524,4 +604,5 @@ class Player:
             if self._shutting_down or state == self._state:
                 return
             self._state = state
-            self.signals.stateChanged.emit(state)
+            generation = self._signal_generation
+        self.signals.post("state", state, generation)

@@ -30,10 +30,10 @@ WINDOW_GEOMETRY_VERSION_KEY = "window_geometry_v7"
 
 
 def _geometry_to_restore(config: Config) -> tuple[int, int, int, int] | None:
-    """返回可恢复的窗口几何；默认尺寸升级时丢弃一次旧尺寸。"""
+    """返回可恢复的窗口几何；进入 1200×800 基准时统一重置一次旧几何。"""
     if not config.get(WINDOW_GEOMETRY_VERSION_KEY, False):
-        # 先清掉旧尺寸再持久化版本标记：即使本次启动未正常 close，
-        # 下次也不会重新恢复迁移前保存的较小窗口。
+        # 旧版 v1-v6 的窗口基准不再保留。先清掉旧几何再持久化当前标记：
+        # 即使本次启动未正常 close，下次也不会重新恢复迁移前的尺寸/位置。
         config.set("window_geometry", None, persist=False)
         config.set(WINDOW_GEOMETRY_VERSION_KEY, True)
         return None

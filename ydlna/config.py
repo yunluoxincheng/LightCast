@@ -37,8 +37,8 @@ DEFAULTS: dict[str, Any] = {
     "update_mirror": True,
     # 窗口几何（x, y, w, h），None 表示用系统默认
     "window_geometry": None,
-    # 窗口默认尺寸版本标记（每次调整默认尺寸时 +1，首次启动重置一次旧几何）
-    "window_geometry_v6": False,
+    # 当前唯一的默认窗口尺寸迁移标记：首次进入 1200×800 基准时重置旧几何，
+    # 此后继续保存用户通过拖拽边框调整后的窗口位置和尺寸。
     "window_geometry_v7": False,
     # 是否已提示过「关闭即最小化到托盘」
     "minimize_hint_shown": False,

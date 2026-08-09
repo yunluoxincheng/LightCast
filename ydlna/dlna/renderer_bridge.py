@@ -129,46 +129,112 @@ class RendererBridge:
         self._poll_tasks = BackgroundTasks()
         self._last_position: Optional[float] = None
         self._last_duration: Optional[float] = None
+        # 保存控制点提供的原始 URI/元数据。Player 播放的是 127.0.0.1 代理地址，
+        # DLNA 服务重启后不能把该内部 URL 暴露给重新连接的控制点。
+        self._current_uri = ""
+        self._current_meta = ""
         # 投屏到达（SetAVTransportURI）回调：由 app 注入，用于立即切页 + 缓冲动画
         # （不等代理/解码，用户体感秒进播放器页）
         self.on_cast_started = None  # Callable[[], None] | None
         # 当前活跃的媒体代理（换媒体时先停旧的）
         self._hls_proxy = None
         self._direct_proxy = None
-        # 连接 player 状态变化，同步到 DLNA TransportState
-        self._state_signal_connected = False
-        self._connect_player_state_signal()
+        # 连接 player 状态变化，同步到新的 DLNA service。
+        self._player_signals_connected = False
+        self._connect_player_signals()
 
-    def _connect_player_state_signal(self) -> None:
-        """确保 player 状态信号只连接一次；DLNA 服务重启时可重新连接。"""
-        if self._state_signal_connected:
+    def _connect_player_signals(self) -> None:
+        """确保 player 同步信号只连接一次；DLNA 服务重启时可重新连接。"""
+        if self._player_signals_connected:
             return
         self._player.signals.stateChanged.connect(self._on_player_state)
-        self._state_signal_connected = True
+        self._player.signals.volumeChanged.connect(self._on_player_volume)
+        self._player.signals.muteChanged.connect(self._on_player_mute)
+        self._player_signals_connected = True
 
-    def _disconnect_player_state_signal(self) -> None:
-        if not getattr(self, "_state_signal_connected", False):
+    def _disconnect_player_signals(self) -> None:
+        if not getattr(self, "_player_signals_connected", False):
             return
-        try:
-            self._player.signals.stateChanged.disconnect(self._on_player_state)
-        except (RuntimeError, TypeError):
-            pass
-        self._state_signal_connected = False
+        for signal, callback in (
+            (self._player.signals.stateChanged, self._on_player_state),
+            (self._player.signals.volumeChanged, self._on_player_volume),
+            (self._player.signals.muteChanged, self._on_player_mute),
+        ):
+            try:
+                signal.disconnect(callback)
+            except (RuntimeError, TypeError):
+                pass
+        self._player_signals_connected = False
 
     def set_services(self, avt, rc, cm) -> None:  # noqa: ANN001
         """注入三个 service 实例（由 DlnaServer 在启动后调用）。"""
-        self._connect_player_state_signal()
+        self._connect_player_signals()
         self._avt = avt
         self._rc = rc
         self._cm = cm
         avt.bridge = self
         rc.bridge = self
-        # 初始音量同步到 player
+        # Player/Bridge 是停服期间仍存活的播放状态所有者。新 service 的默认值
+        # 必须被当前状态覆盖，不能反向把默认音量 80 写回正在播放的 Player。
+        self._sync_services_from_player()
+
+    @staticmethod
+    def _write_state_variable(service, name: str, value) -> None:  # noqa: ANN001
         try:
-            vol = int(rc.state_variable("Volume").value)
-            self._player.set_volume(vol)
+            service.state_variable(name).value = value
         except Exception as e:  # noqa: BLE001
-            log.debug("初始音量同步失败: %s", e)
+            log.debug("同步状态变量 %s 失败: %s", name, e)
+
+    def _player_transport_state(self, state: str | None = None) -> str:
+        state = state or self._player.get_state()
+        mapping = {
+            "playing": "PLAYING",
+            "paused": "PAUSED_PLAYBACK",
+            "stopped": "STOPPED",
+        }
+        if state in mapping:
+            return mapping[state]
+        if state == "idle" and (self._current_uri or self._player.get_url()):
+            return "STOPPED"
+        return "NO_MEDIA_PRESENT"
+
+    def _sync_services_from_player(self) -> None:
+        """服务启动/重启后立即恢复持久播放状态，不等待下一次 player 信号。"""
+        avt = self._avt
+        rc = self._rc
+        if avt is None or rc is None:
+            return
+
+        position = self._player.get_position()
+        duration = self._player.get_duration()
+        transport_state = self._player_transport_state()
+        uri = self._current_uri
+        meta = self._current_meta
+
+        for name, value in (
+            ("TransportState", transport_state),
+            ("TransportStatus", "OK"),
+            ("AVTransportURI", uri),
+            ("AVTransportURIMetaData", meta),
+            ("CurrentTrackURI", uri),
+            ("CurrentTrackMetaData", meta),
+            ("CurrentTrack", 1 if uri else 0),
+            ("NumberOfTracks", 1 if uri else 0),
+            ("RelativeTimePosition", seconds_to_dlna(position)),
+            ("AbsoluteTimePosition", seconds_to_dlna(position)),
+            ("CurrentMediaDuration", seconds_to_dlna(duration)),
+            ("CurrentTrackDuration", seconds_to_dlna(duration)),
+        ):
+            self._write_state_variable(avt, name, value)
+        self._write_state_variable(rc, "Volume", self._player.get_volume())
+        self._write_state_variable(
+            rc, "Mute", "1" if self._player.is_muted() else "0"
+        )
+
+        self._last_position = position
+        self._last_duration = duration
+        if transport_state == "PLAYING":
+            self._start_polling()
 
     # ------------------------------------------------------------------ #
     # DLNA action → Player（由各 service 的 action handler 调用）
@@ -207,6 +273,9 @@ class RendererBridge:
             log.warning("投屏 URL 被安全策略拦截: %s（%s）", url, e.reason)
             self._set_transport_state("ERROR_OCCURRED")
             return
+
+        self._current_uri = url
+        self._current_meta = meta or ""
 
         # 先通知 UI「投屏到达」：立即切到播放器页并显示缓冲动画，
         # 代理/解码在后台进行（用户体感秒进）
@@ -309,27 +378,22 @@ class RendererBridge:
     # ------------------------------------------------------------------ #
     def _on_player_state(self, state: str) -> None:
         """player 的 stateChanged 信号回调（已在主线程）。"""
-        mapping = {
-            "playing": "PLAYING",
-            "paused": "PAUSED_PLAYBACK",
-            "stopped": "STOPPED",
-            "idle": "NO_MEDIA_PRESENT",
-        }
-        dlna_state = mapping.get(state)
-        if dlna_state is None:
-            return
-        # idle 不一定是 NO_MEDIA（可能是播完回到 idle），只有有 URI 时才映射
-        if state == "idle":
-            url = self._player.get_url()
-            if url:
-                dlna_state = "STOPPED"
-            else:
-                dlna_state = "NO_MEDIA_PRESENT"
+        dlna_state = self._player_transport_state(state)
         self._set_transport_state(dlna_state)
         if state in ("playing",):
             self._start_polling()
         elif state in ("idle", "stopped"):
             self._stop_polling()
+
+    def _on_player_volume(self, volume: int) -> None:
+        if self._rc is not None:
+            self._write_state_variable(self._rc, "Volume", volume)
+
+    def _on_player_mute(self, muted: bool) -> None:
+        if self._rc is not None:
+            self._write_state_variable(
+                self._rc, "Mute", "1" if muted else "0"
+            )
 
     def _set_transport_state(self, dlna_state: str) -> None:
         if self._avt is None:
@@ -394,7 +458,7 @@ class RendererBridge:
     def shutdown(self) -> None:
         """停止协议桥接；关闭服务时保留当前媒体代理与播放。"""
         self._stop_polling()
-        self._disconnect_player_state_signal()
+        self._disconnect_player_signals()
         # 旧 service 可能仍被库内部对象短暂持有；解除双向引用，避免播放器
         # 状态在服务停止/重启后继续写入已经失效的 state variable。
         for service in (
