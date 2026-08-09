@@ -120,5 +120,5 @@
   "player.error.hint.invalid": "媒体内容无法识别，源站可能返回了错误内容（如登录页），请尝试其他清晰度或资源",
   "player.error.hint.network": "网络连接失败或超时，请检查网络后重试",
   "error.cast_url_blocked": "投屏地址被安全策略拦截",
-  "error.cast_url_blocked.hint": "该投屏地址指向本机或内网（可能为 SSRF 攻击）。如需投屏内网设备，请在「设置 → 投屏服务」中开启「允许内网投屏源」。"
+  "error.cast_url_blocked.hint": "该投屏地址已被安全策略拦截。回环、link-local、云元数据等高风险地址始终禁止；若已关闭「允许内网投屏源」，可重新开启以允许普通 RFC1918 / ULA 私网媒体源。"
 }

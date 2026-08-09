@@ -120,5 +120,5 @@
   "player.error.hint.invalid": "The media content could not be recognized — the source may have returned an error page. Try another quality or source.",
   "player.error.hint.network": "Network connection failed or timed out. Check your network and retry.",
   "error.cast_url_blocked": "Cast URL blocked by safety policy",
-  "error.cast_url_blocked.hint": "The cast URL points to this machine or the intranet (possible SSRF). To cast from a LAN device, enable \"Allow intranet cast sources\" under Settings → Cast service."
+  "error.cast_url_blocked.hint": "The cast URL was blocked by the security policy. Loopback, link-local, cloud-metadata, and other high-risk addresses are always blocked. If \"Allow intranet cast sources\" is disabled, enable it to allow ordinary RFC1918 / ULA private media sources."
 }
