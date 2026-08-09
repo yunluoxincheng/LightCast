@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：74 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递与窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：75 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -185,11 +185,11 @@
 ### M1. 代理失败状态不一致
 
 - **文件**：`ydlna/dlna/renderer_bridge.py:181-200`
-- **状态**：`[x]` 已修复（2026-08-09）：`on_set_uri` 包 try/except，失败置 `ERROR_OCCURRED`；`_hls_proxy/_direct_proxy` 在 `__init__` 声明为 None。
+- **状态**：`[x]` 已修复（2026-08-10）：`on_set_uri` 包 try/except，失败置 `TransportStatus=ERROR_OCCURRED`；`TransportState` 始终保持规范允许的播放状态。Bridge 在 service 停服期间持有错误状态并在重绑后恢复；新的 SetAVTransportURI 会先重置为 `OK`，URL/SSRF/代理阶段失败时再准确置错。`_hls_proxy/_direct_proxy` 在 `__init__` 声明为 None。
 - **问题**：`on_set_uri` 无 try / except，代理失败时 `AVTransportURI` 已更新但播放器没切，
   UI 显示新标题却播旧内容；旧代理可能泄漏（端口 / aiohttp server）。
 - **建议**：`on_set_uri` 包 try / except，失败时回滚 `AVTransportURI` 或置
-  `TransportState=ERROR_OCCURRED`；`_hls_proxy / _direct_proxy` 在 `__init__` 声明为 None。
+  `TransportStatus=ERROR_OCCURRED`；`_hls_proxy / _direct_proxy` 在 `__init__` 声明为 None。
 
 ### M2. 时间解析坑
 

@@ -129,6 +129,10 @@ class RendererBridge:
         self._poll_tasks = BackgroundTasks()
         self._last_position: Optional[float] = None
         self._last_duration: Optional[float] = None
+        # TransportStatus 与 TransportState 是两条独立的 UPnP 状态轴：
+        # 错误只能写 ERROR_OCCURRED 到前者，后者必须保持合法的播放状态。
+        # Bridge 在 DLNA service 停服期间继续存活，因此同时持有该状态供重绑恢复。
+        self._transport_status = "OK"
         # 保存控制点提供的原始 URI/元数据。Player 播放的是 127.0.0.1 代理地址，
         # DLNA 服务重启后不能把该内部 URL 暴露给重新连接的控制点。
         self._current_uri = ""
@@ -213,7 +217,7 @@ class RendererBridge:
 
         for name, value in (
             ("TransportState", transport_state),
-            ("TransportStatus", "OK"),
+            ("TransportStatus", self._transport_status),
             ("AVTransportURI", uri),
             ("AVTransportURIMetaData", meta),
             ("CurrentTrackURI", uri),
@@ -251,17 +255,20 @@ class RendererBridge:
         SSRF 防护（三道关）：
         1. 非 http(s) scheme（file:// / edl:// / data: 等）→ 直接拒绝，不传给 mpv。
         2. 入口 validate_upstream_url：URL 字面量指向本机/云元数据/（收紧模式下）私网
-           → 抛 UrlBlockedError → 置 ERROR_OCCURRED，绝不 fallback 到 mpv。
+           → 抛 UrlBlockedError → 置 TransportStatus=ERROR_OCCURRED，绝不 fallback 到 mpv。
         3. 代理层 setup_*_proxy 内部 + SSRFSafeConnector 连接时再校验（堵 302/rebinding）。
         普通失败（403/格式/网络）同样不绕过代理层。
         """
         title = parse_title_from_didl(meta) or url
         log.info("桥接: 设置媒体 title=%r url=%s", title, url)
+        # 新的 SetAVTransportURI 是一次新的播放尝试，先清除上一次错误；
+        # 本次任一校验/代理阶段失败时会再次准确置 ERROR_OCCURRED。
+        self._set_transport_status("OK")
 
         # 第一道：scheme 白名单
         if not url.lower().startswith(("http://", "https://")):
             log.warning("拒绝非 http(s) 投屏 URL（可能尝试读取本地文件）: %s", url)
-            self._set_transport_state("ERROR_OCCURRED")
+            self._set_transport_status("ERROR_OCCURRED")
             return
 
         # 第二道：入口安全校验。被拦（UrlBlockedError）→ 直接 ERROR，绝不 fallback。
@@ -271,7 +278,7 @@ class RendererBridge:
             validate_upstream_url(url, allow_intranet=allow_intranet)
         except UrlBlockedError as e:
             log.warning("投屏 URL 被安全策略拦截: %s（%s）", url, e.reason)
-            self._set_transport_state("ERROR_OCCURRED")
+            self._set_transport_status("ERROR_OCCURRED")
             return
 
         self._current_uri = url
@@ -295,14 +302,14 @@ class RendererBridge:
                 self._player.play(proxied, title)
                 return
             log.warning("代理初始化失败；为避免绕过 SSRF 防护，不直接播放原始 URL")
-            self._set_transport_state("ERROR_OCCURRED")
+            self._set_transport_status("ERROR_OCCURRED")
         except UrlBlockedError as e:
             # 代理层 SSRF 拒绝（分片/密钥/重定向目标命中黑名单）：同样绝不 fallback。
             log.warning("代理阶段 URL 被安全策略拦截: %s（%s）", url, e.reason)
-            self._set_transport_state("ERROR_OCCURRED")
+            self._set_transport_status("ERROR_OCCURRED")
         except Exception as e:  # noqa: BLE001  代理/播放失败：回滚状态，避免 UI 不一致
             log.warning("设置媒体失败: %s", e)
-            self._set_transport_state("ERROR_OCCURRED")
+            self._set_transport_status("ERROR_OCCURRED")
 
     def _allow_intranet(self) -> bool:
         """读取「允许内网投屏源」配置（与 hls_rewriter 一致，默认 True）。"""
@@ -402,6 +409,18 @@ class RendererBridge:
             self._avt.state_variable("TransportState").value = dlna_state
         except Exception as e:  # noqa: BLE001
             log.debug("设置 TransportState 失败: %s", e)
+
+    def _set_transport_status(self, status: str) -> None:
+        """更新协议状态；错误状态不能写入 TransportState。"""
+        if status not in ("OK", "ERROR_OCCURRED"):
+            raise ValueError(f"非法 TransportStatus: {status}")
+        self._transport_status = status
+        if self._avt is None:
+            return
+        try:
+            self._avt.state_variable("TransportStatus").value = status
+        except Exception as e:  # noqa: BLE001
+            log.debug("设置 TransportStatus 失败: %s", e)
 
     # ------------------------------------------------------------------ #
     # 进度回传（1Hz 定时器）

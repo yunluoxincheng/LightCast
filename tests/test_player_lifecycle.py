@@ -255,6 +255,8 @@ async def _renderer_restart_scenario() -> None:
     assert old_rc.state_variable("Mute").value == "1"
     assert player.set_volume_calls == []
     assert bridge._poll_task is not None  # noqa: SLF001
+    bridge._set_transport_status("ERROR_OCCURRED")  # noqa: SLF001
+    assert old_avt.state_variable("TransportStatus").value == "ERROR_OCCURRED"
 
     bridge.shutdown()
 
@@ -279,6 +281,7 @@ async def _renderer_restart_scenario() -> None:
 
     # 不制造任何新的 player signal：重绑动作本身必须立即恢复完整播放状态。
     assert new_avt.state_variable("TransportState").value == "PLAYING"
+    assert new_avt.state_variable("TransportStatus").value == "ERROR_OCCURRED"
     assert new_avt.state_variable("RelativeTimePosition").value == "0:00:12"
     assert new_avt.state_variable("CurrentMediaDuration").value == "0:01:00"
     assert new_avt.state_variable("AVTransportURI").value == (
@@ -294,6 +297,9 @@ async def _renderer_restart_scenario() -> None:
     assert new_rc.state_variable("Mute").value == "1"
     assert player.volume == 37
     assert player.set_volume_calls == []
+
+    bridge._set_transport_status("OK")  # noqa: SLF001
+    assert new_avt.state_variable("TransportStatus").value == "OK"
 
     player.state = "paused"
     state_signal.emit("paused")
