@@ -21,6 +21,7 @@ from qfluentwidgets import (
     TitleLabel,
 )
 
+from ..async_tasks import BackgroundTasks
 from ..config import Config
 from ..constants import APP_NAME, APP_VERSION
 from ..i18n import tr, Translator
@@ -71,6 +72,7 @@ class SettingsInterface(QWidget):
         self.setObjectName("settings-interface")
         self._config = config
         self._player = player
+        self._background_tasks = BackgroundTasks()
         self._build_ui()
         self._load_values()
         self._connect()
@@ -295,8 +297,6 @@ class SettingsInterface(QWidget):
 
     def _on_check_update_clicked(self) -> None:
         """手动检查更新（异步，非阻塞；结果用 InfoBar / 更新流程提示）。"""
-        import asyncio
-
         from ..updater import check_for_update, run_update_flow
         from qfluentwidgets import InfoBar, InfoBarPosition
 
@@ -338,7 +338,11 @@ class SettingsInterface(QWidget):
                 btn.setEnabled(True)
                 btn.setText(tr("settings.check_update"))
 
-        asyncio.ensure_future(_do())
+        self._background_tasks.create(_do(), name="manual-update-check")
+
+    async def shutdown(self) -> None:
+        """取消仍在进行的手动更新检查/下载，供应用退出清理调用。"""
+        await self._background_tasks.cancel_all()
 
     def _on_autostart_changed(self, checked: bool) -> None:
         self._config.set("dlna_enabled", checked)

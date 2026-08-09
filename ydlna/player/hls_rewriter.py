@@ -81,6 +81,7 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 from aiohttp import web
 
+from ..async_tasks import BackgroundTasks
 from ..config import Config
 from ..logger import get_logger
 from ._url_guard import (
@@ -236,7 +237,9 @@ async def _read_capped(resp: aiohttp.ClientResponse, what: str,
             if len(buf) > cap:
                 log.warning("%s超过缓冲上限 %d MB，放弃", what, cap // (1024 * 1024))
                 return None
-    except (aiohttp.ClientError, asyncio.CancelledError, OSError) as e:
+    except asyncio.CancelledError:
+        raise
+    except (aiohttp.ClientError, OSError) as e:
         log.warning("%s读取中断: %s", what, e)
         return None
     return bytes(buf)
@@ -317,6 +320,7 @@ class _BaseProxy:
         # 每个代理固定使用创建时的策略快照，避免设置切换导致 URL 校验与
         # 连接器策略不一致。
         self._allow_intranet: bool = _allow_intranet()
+        self._background_tasks = BackgroundTasks()
 
     @property
     def port(self) -> int:
@@ -352,6 +356,8 @@ class _BaseProxy:
         raise NotImplementedError
 
     async def stop(self) -> None:
+        # 预热任务会使用当前 session；必须先取消等待，再关闭 session。
+        await self._background_tasks.cancel_all()
         if self._site is not None:
             try:
                 await self._site.stop()
@@ -660,7 +666,10 @@ class HlsProxy(_BaseProxy):
             if nxt in self._ts_cache_order:  # 已在预取队列
                 continue
             self._ts_cache_order.append(nxt)
-            asyncio.create_task(self._warm_hybrid_segment(nxt))
+            self._background_tasks.create(
+                self._warm_hybrid_segment(nxt),
+                name=f"warm-hls-segment-{nxt}",
+            )
 
     def _trim_cache(self) -> None:
         """简单 LRU：缓存上限 8 个分片（每个约 1~2MB），防止内存膨胀。"""
