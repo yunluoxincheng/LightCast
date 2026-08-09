@@ -154,7 +154,9 @@ class DlnaServer:
 
     async def async_stop(self) -> None:
         """停止 DLNA 服务。"""
-        if not self._running:
+        # 启动协程可能在 _running=True 前失败或被取消；只要已有部分资源，
+        # 仍须执行清理，避免 HTTP server / SSDP 线程残留。
+        if not self._running and self._server is None and self._ssdp is None:
             return
         log.info("停止 DLNA 服务")
         # 先停 SSDP（发 byebye）
@@ -162,11 +164,15 @@ class DlnaServer:
             self._ssdp.stop()
             self._ssdp = None
         self._bridge.shutdown()
-        if self._server is not None:
+        server = self._server
+        if server is not None:
             try:
-                await self._server.async_stop()
+                await server.async_stop()
             except Exception as e:  # noqa: BLE001
                 log.warning("async_stop 异常: %s", e)
+                # 底层 listener 是否真正关闭未知：保留引用与 running 状态，
+                # 让调用方可重试清理，不能宣称已停止后丢失唯一资源句柄。
+                raise
         self._running = False
         self._server = None
 

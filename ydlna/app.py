@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import TYPE_CHECKING
+from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from qfluentwidgets import Theme, setTheme, setThemeColor
 
+from .async_tasks import BackgroundTasks
 from .config import Config
 from .constants import APP_NAME
 from .dlna.renderer_bridge import RendererBridge
@@ -45,6 +46,48 @@ class _AppSignals(QObject):
 
     # 收到新的媒体投屏：(title, url)
     castReceived = Signal(str, str)
+
+
+async def _change_service_state(
+    server: DlnaServer,
+    window: Any,
+    config: Config,
+    start: bool,
+) -> None:
+    """启停 DLNA 服务，并确保失败/取消时资源与 UI 状态一致。"""
+    try:
+        if start:
+            await server.async_start()
+        else:
+            await server.async_stop()
+    except asyncio.CancelledError:
+        await server.async_stop()
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.exception("%s DLNA 服务失败: %s", "启动" if start else "停止", e)
+        try:
+            await server.async_stop()
+        except Exception as cleanup_error:  # noqa: BLE001
+            log.warning("清理 DLNA 服务失败: %s", cleanup_error)
+    finally:
+        window.homeInterface.set_service_running(server.running)
+        if server.running:
+            window.refresh_device_info(
+                config.get("friendly_name", "轻投"),
+                get_local_ip(),
+            )
+
+
+async def _start_configured_service(
+    server: DlnaServer,
+    window: Any,
+    config: Config,
+) -> None:
+    """按配置自动启动服务，并复用手动启停的失败清理路径。"""
+    if not config.get("dlna_enabled", True):
+        return
+    log.info("自动启动 DLNA 服务")
+    await _change_service_state(server, window, config, True)
 
 
 async def run() -> int:
@@ -92,6 +135,7 @@ async def run() -> int:
 
     bridge = RendererBridge(player)
     server = DlnaServer(bridge, config)
+    background_tasks = BackgroundTasks()
 
     # UI
     window = MainWindow(player, server, config)
@@ -131,20 +175,17 @@ async def run() -> int:
     player.signals.muteChanged.connect(lambda m: config.set("muted", m))
 
     # 主页启停按钮
-    async def toggle_service(start: bool) -> None:  # noqa: ANN202
-        if start:
-            await server.async_start()
-        else:
-            await server.async_stop()
-        window.homeInterface.set_service_running(server.running)
-        if server.running:
-            window.refresh_device_info(
-                config.get("friendly_name", "轻投"),
-                get_local_ip(),
-            )
+    service_task: asyncio.Task[None] | None = None
 
     def _toggle_service_wrapper(start: bool) -> None:
-        asyncio.create_task(toggle_service(start))
+        nonlocal service_task
+        if service_task is not None and not service_task.done():
+            log.debug("DLNA 服务正在切换状态，忽略重复请求")
+            return
+        service_task = background_tasks.create(
+            _change_service_state(server, window, config, start),
+            name="toggle-dlna-service",
+        )
 
     window.homeInterface.toggleServiceRequested.connect(_toggle_service_wrapper)
 
@@ -218,7 +259,7 @@ async def run() -> int:
                     use_mirror=bool(config.get("update_mirror", True)),
                 )
 
-        asyncio.create_task(_do())
+        background_tasks.create(_do(), name="startup-update-check")
 
     QTimer.singleShot(4000, _startup_update_check)
 
@@ -229,10 +270,7 @@ async def run() -> int:
     )
 
     # 开机自动启动服务
-    if config.get("dlna_enabled", True):
-        log.info("自动启动 DLNA 服务")
-        await server.async_start()
-        window.homeInterface.set_service_running(server.running)
+    await _start_configured_service(server, window, config)
 
     # 等待退出
     stop_event = asyncio.Event()
@@ -241,10 +279,13 @@ async def run() -> int:
 
     # 清理
     log.info("应用退出，清理资源")
+    await background_tasks.cancel_all()
+    await window.settingsInterface.shutdown()
     try:
         await server.async_stop()
     except Exception as e:  # noqa: BLE001
         log.warning("停止服务异常: %s", e)
+    await bridge.shutdown_all()
     player.shutdown()
 
     return 0

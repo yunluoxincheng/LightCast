@@ -81,6 +81,7 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 from aiohttp import web
 
+from ..async_tasks import BackgroundTasks
 from ..config import Config
 from ..logger import get_logger
 from ._url_guard import (
@@ -236,7 +237,9 @@ async def _read_capped(resp: aiohttp.ClientResponse, what: str,
             if len(buf) > cap:
                 log.warning("%s超过缓冲上限 %d MB，放弃", what, cap // (1024 * 1024))
                 return None
-    except (aiohttp.ClientError, asyncio.CancelledError, OSError) as e:
+    except asyncio.CancelledError:
+        raise
+    except (aiohttp.ClientError, OSError) as e:
         log.warning("%s读取中断: %s", what, e)
         return None
     return bytes(buf)
@@ -317,6 +320,7 @@ class _BaseProxy:
         # 每个代理固定使用创建时的策略快照，避免设置切换导致 URL 校验与
         # 连接器策略不一致。
         self._allow_intranet: bool = _allow_intranet()
+        self._background_tasks = BackgroundTasks()
 
     @property
     def port(self) -> int:
@@ -352,6 +356,8 @@ class _BaseProxy:
         raise NotImplementedError
 
     async def stop(self) -> None:
+        # 预热任务会使用当前 session；必须先取消等待，再关闭 session。
+        await self._background_tasks.cancel_all()
         if self._site is not None:
             try:
                 await self._site.stop()
@@ -633,8 +639,10 @@ class HlsProxy(_BaseProxy):
             log.warning("混合分片 %d 上游返回 HTTP %s", index, resp.status)
             resp.close()
             return False
-        data = await _read_capped(resp, f"混合分片 {index}")
-        resp.close()
+        try:
+            data = await _read_capped(resp, f"混合分片 {index}")
+        finally:
+            resp.close()
         if data is None:
             return False
         if _looks_html(data):
@@ -660,7 +668,10 @@ class HlsProxy(_BaseProxy):
             if nxt in self._ts_cache_order:  # 已在预取队列
                 continue
             self._ts_cache_order.append(nxt)
-            asyncio.create_task(self._warm_hybrid_segment(nxt))
+            self._background_tasks.create(
+                self._warm_hybrid_segment(nxt),
+                name=f"warm-hls-segment-{nxt}",
+            )
 
     def _trim_cache(self) -> None:
         """简单 LRU：缓存上限 8 个分片（每个约 1~2MB），防止内存膨胀。"""
@@ -677,8 +688,10 @@ class HlsProxy(_BaseProxy):
         if resp.status != 200:
             resp.close()
             return
-        data = await _read_capped(resp, f"混合分片 {index}（预热）")
-        resp.close()
+        try:
+            data = await _read_capped(resp, f"混合分片 {index}（预热）")
+        finally:
+            resp.close()
         if data is None:
             return
         off = _find_ts_offset(data)
@@ -727,8 +740,10 @@ class HlsProxy(_BaseProxy):
             log.warning("图片分片 %d 上游返回 HTTP %s", index, resp.status)
             resp.close()
             return False
-        data = await _read_capped(resp, f"图片分片 {index}")
-        resp.close()
+        try:
+            data = await _read_capped(resp, f"图片分片 {index}")
+        finally:
+            resp.close()
         if data is None:
             return False
         try:
@@ -805,8 +820,10 @@ class DirectProxy(_BaseProxy):
             log.warning("直链上游返回 HTTP %s: %s", resp.status, self._url)
             resp.close()
             return False
-        data = await _read_capped(resp, "直链媒体")
-        resp.close()
+        try:
+            data = await _read_capped(resp, "直链媒体")
+        finally:
+            resp.close()
         if data is None or _looks_html(data):
             return False
         if self._mode == "hybrid":
@@ -895,8 +912,10 @@ async def setup_hls_proxy(
             return await abort(f"下载 m3u8 失败（网络错误）: {m3u8_url}")
         if resp.status != 200:
             return await abort(f"下载 m3u8 失败: HTTP {resp.status}")
-        body = await _read_capped(resp, "m3u8 播放列表", cap=_MAX_M3U8)
-        resp.close()
+        try:
+            body = await _read_capped(resp, "m3u8 播放列表", cap=_MAX_M3U8)
+        finally:
+            resp.close()
         if body is None:
             return await abort(f"m3u8 超过 {_MAX_M3U8 // 1024}KB，疑似异常: {m3u8_url}")
         if _looks_html(body):
@@ -969,8 +988,12 @@ async def setup_hls_proxy(
                 timeout=_TIMEOUT,
             )
             if probe_resp is not None and probe_resp.status in (200, 206):
-                probe = await _read_capped(probe_resp, "分片探测", cap=_MAX_PROBE)
-                probe_resp.close()
+                try:
+                    probe = await _read_capped(
+                        probe_resp, "分片探测", cap=_MAX_PROBE
+                    )
+                finally:
+                    probe_resp.close()
                 if probe is None:
                     probe = b""  # 探测超限按未知类型处理（走 video 模式）
                 kind = _detect_image(probe)
@@ -1093,8 +1116,12 @@ async def setup_direct_proxy(
             status = probe_resp.status
             probe_resp.close()
             return await abort(f"直链探测失败: HTTP {status} ({url})")
-        probe = await _read_capped(probe_resp, "直链探测", cap=_MAX_PROBE)
-        probe_resp.close()
+        try:
+            probe = await _read_capped(
+                probe_resp, "直链探测", cap=_MAX_PROBE
+            )
+        finally:
+            probe_resp.close()
         if probe is None:
             return await abort(
                 f"直链探测超过 {_MAX_PROBE // 1024}KB，疑似异常: {url}"
