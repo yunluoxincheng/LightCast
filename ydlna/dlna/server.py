@@ -170,6 +170,9 @@ class DlnaServer:
                 await server.async_stop()
             except Exception as e:  # noqa: BLE001
                 log.warning("async_stop 异常: %s", e)
+                # 底层 listener 是否真正关闭未知：保留引用与 running 状态，
+                # 让调用方可重试清理，不能宣称已停止后丢失唯一资源句柄。
+                raise
         self._running = False
         self._server = None
 

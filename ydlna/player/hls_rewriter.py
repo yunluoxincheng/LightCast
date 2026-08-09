@@ -639,8 +639,10 @@ class HlsProxy(_BaseProxy):
             log.warning("混合分片 %d 上游返回 HTTP %s", index, resp.status)
             resp.close()
             return False
-        data = await _read_capped(resp, f"混合分片 {index}")
-        resp.close()
+        try:
+            data = await _read_capped(resp, f"混合分片 {index}")
+        finally:
+            resp.close()
         if data is None:
             return False
         if _looks_html(data):
@@ -686,8 +688,10 @@ class HlsProxy(_BaseProxy):
         if resp.status != 200:
             resp.close()
             return
-        data = await _read_capped(resp, f"混合分片 {index}（预热）")
-        resp.close()
+        try:
+            data = await _read_capped(resp, f"混合分片 {index}（预热）")
+        finally:
+            resp.close()
         if data is None:
             return
         off = _find_ts_offset(data)
@@ -736,8 +740,10 @@ class HlsProxy(_BaseProxy):
             log.warning("图片分片 %d 上游返回 HTTP %s", index, resp.status)
             resp.close()
             return False
-        data = await _read_capped(resp, f"图片分片 {index}")
-        resp.close()
+        try:
+            data = await _read_capped(resp, f"图片分片 {index}")
+        finally:
+            resp.close()
         if data is None:
             return False
         try:
@@ -814,8 +820,10 @@ class DirectProxy(_BaseProxy):
             log.warning("直链上游返回 HTTP %s: %s", resp.status, self._url)
             resp.close()
             return False
-        data = await _read_capped(resp, "直链媒体")
-        resp.close()
+        try:
+            data = await _read_capped(resp, "直链媒体")
+        finally:
+            resp.close()
         if data is None or _looks_html(data):
             return False
         if self._mode == "hybrid":
@@ -904,8 +912,10 @@ async def setup_hls_proxy(
             return await abort(f"下载 m3u8 失败（网络错误）: {m3u8_url}")
         if resp.status != 200:
             return await abort(f"下载 m3u8 失败: HTTP {resp.status}")
-        body = await _read_capped(resp, "m3u8 播放列表", cap=_MAX_M3U8)
-        resp.close()
+        try:
+            body = await _read_capped(resp, "m3u8 播放列表", cap=_MAX_M3U8)
+        finally:
+            resp.close()
         if body is None:
             return await abort(f"m3u8 超过 {_MAX_M3U8 // 1024}KB，疑似异常: {m3u8_url}")
         if _looks_html(body):
@@ -978,8 +988,12 @@ async def setup_hls_proxy(
                 timeout=_TIMEOUT,
             )
             if probe_resp is not None and probe_resp.status in (200, 206):
-                probe = await _read_capped(probe_resp, "分片探测", cap=_MAX_PROBE)
-                probe_resp.close()
+                try:
+                    probe = await _read_capped(
+                        probe_resp, "分片探测", cap=_MAX_PROBE
+                    )
+                finally:
+                    probe_resp.close()
                 if probe is None:
                     probe = b""  # 探测超限按未知类型处理（走 video 模式）
                 kind = _detect_image(probe)
@@ -1102,8 +1116,12 @@ async def setup_direct_proxy(
             status = probe_resp.status
             probe_resp.close()
             return await abort(f"直链探测失败: HTTP {status} ({url})")
-        probe = await _read_capped(probe_resp, "直链探测", cap=_MAX_PROBE)
-        probe_resp.close()
+        try:
+            probe = await _read_capped(
+                probe_resp, "直链探测", cap=_MAX_PROBE
+            )
+        finally:
+            probe_resp.close()
         if probe is None:
             return await abort(
                 f"直链探测超过 {_MAX_PROBE // 1024}KB，疑似异常: {url}"

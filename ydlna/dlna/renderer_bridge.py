@@ -370,4 +370,24 @@ class RendererBridge:
     # 清理
     # ------------------------------------------------------------------ #
     def shutdown(self) -> None:
+        """停止 DLNA 状态轮询；关闭服务时保留当前媒体代理与播放。"""
         self._stop_polling()
+
+    async def shutdown_all(self) -> None:
+        """应用退出清理：等待轮询退出，并停止所有当前媒体代理。"""
+        poll_task = self._poll_task
+        self._stop_polling()
+        if poll_task is not None:
+            await asyncio.gather(poll_task, return_exceptions=True)
+        self._poll_task = None
+
+        for attr in ("_hls_proxy", "_direct_proxy"):
+            proxy = getattr(self, attr, None)
+            if proxy is None:
+                continue
+            try:
+                await proxy.stop()
+            except Exception as e:  # noqa: BLE001
+                log.warning("应用退出时停止媒体代理失败（%s）: %s", attr, e)
+            finally:
+                setattr(self, attr, None)

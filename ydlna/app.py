@@ -78,6 +78,18 @@ async def _change_service_state(
             )
 
 
+async def _start_configured_service(
+    server: DlnaServer,
+    window: Any,
+    config: Config,
+) -> None:
+    """按配置自动启动服务，并复用手动启停的失败清理路径。"""
+    if not config.get("dlna_enabled", True):
+        return
+    log.info("自动启动 DLNA 服务")
+    await _change_service_state(server, window, config, True)
+
+
 async def run() -> int:
     """主协程。在 qasync 的 QEventLoop 中运行。"""
     from PySide6.QtWidgets import QApplication
@@ -258,10 +270,7 @@ async def run() -> int:
     )
 
     # 开机自动启动服务
-    if config.get("dlna_enabled", True):
-        log.info("自动启动 DLNA 服务")
-        await server.async_start()
-        window.homeInterface.set_service_running(server.running)
+    await _start_configured_service(server, window, config)
 
     # 等待退出
     stop_event = asyncio.Event()
@@ -276,6 +285,7 @@ async def run() -> int:
         await server.async_stop()
     except Exception as e:  # noqa: BLE001
         log.warning("停止服务异常: %s", e)
+    await bridge.shutdown_all()
     player.shutdown()
 
     return 0
