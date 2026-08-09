@@ -127,11 +127,15 @@ class AVTransportService(UpnpServerService):
         CurrentURIMetaData: str = "",  # pylint: disable=invalid-name
     ) -> dict[str, UpnpStateVariable]:
         log.info("SetAVTransportURI: %s", CurrentURI)
-        self.state_variable("AVTransportURI").value = CurrentURI
-        self.state_variable("AVTransportURIMetaData").value = CurrentURIMetaData or ""
-        self.state_variable("TransportState").value = "STOPPED"
         if self.bridge is not None:
+            # RendererBridge 负责把 URI/meta、代理切换、Player.play 和状态提交
+            # 作为同一个串行事务处理，失败时可恢复上一份已提交媒体身份。
             await self.bridge.on_set_uri(CurrentURI, CurrentURIMetaData or "")
+        else:
+            # 无 bridge 的退化路径仍保持 service 自身可用。
+            self.state_variable("AVTransportURI").value = CurrentURI
+            self.state_variable("AVTransportURIMetaData").value = CurrentURIMetaData or ""
+            self.state_variable("TransportState").value = "STOPPED"
         return {}
 
     @callable_action(

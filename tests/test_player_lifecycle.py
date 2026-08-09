@@ -255,8 +255,13 @@ async def _renderer_restart_scenario() -> None:
     assert old_rc.state_variable("Mute").value == "1"
     assert player.set_volume_calls == []
     assert bridge._poll_task is not None  # noqa: SLF001
-    bridge._set_transport_status("ERROR_OCCURRED")  # noqa: SLF001
+    # 用真实早期拒绝路径制造错误：候选 URI 必须回滚到上一份已提交媒体。
+    await bridge.on_set_uri("file://blocked", "blocked metadata")
     assert old_avt.state_variable("TransportStatus").value == "ERROR_OCCURRED"
+    assert old_avt.state_variable("AVTransportURI").value == (
+        "http://192.168.1.20/video.mp4"
+    )
+    assert old_avt.state_variable("TransportState").value == "PLAYING"
 
     bridge.shutdown()
 
