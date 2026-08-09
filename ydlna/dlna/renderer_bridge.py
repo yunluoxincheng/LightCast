@@ -136,10 +136,28 @@ class RendererBridge:
         self._hls_proxy = None
         self._direct_proxy = None
         # 连接 player 状态变化，同步到 DLNA TransportState
+        self._state_signal_connected = False
+        self._connect_player_state_signal()
+
+    def _connect_player_state_signal(self) -> None:
+        """确保 player 状态信号只连接一次；DLNA 服务重启时可重新连接。"""
+        if self._state_signal_connected:
+            return
         self._player.signals.stateChanged.connect(self._on_player_state)
+        self._state_signal_connected = True
+
+    def _disconnect_player_state_signal(self) -> None:
+        if not getattr(self, "_state_signal_connected", False):
+            return
+        try:
+            self._player.signals.stateChanged.disconnect(self._on_player_state)
+        except (RuntimeError, TypeError):
+            pass
+        self._state_signal_connected = False
 
     def set_services(self, avt, rc, cm) -> None:  # noqa: ANN001
         """注入三个 service 实例（由 DlnaServer 在启动后调用）。"""
+        self._connect_player_state_signal()
         self._avt = avt
         self._rc = rc
         self._cm = cm
@@ -374,8 +392,23 @@ class RendererBridge:
     # 清理
     # ------------------------------------------------------------------ #
     def shutdown(self) -> None:
-        """停止 DLNA 状态轮询；关闭服务时保留当前媒体代理与播放。"""
+        """停止协议桥接；关闭服务时保留当前媒体代理与播放。"""
         self._stop_polling()
+        self._disconnect_player_state_signal()
+        # 旧 service 可能仍被库内部对象短暂持有；解除双向引用，避免播放器
+        # 状态在服务停止/重启后继续写入已经失效的 state variable。
+        for service in (
+            getattr(self, "_avt", None),
+            getattr(self, "_rc", None),
+            getattr(self, "_cm", None),
+        ):
+            if service is not None and getattr(service, "bridge", None) is self:
+                service.bridge = None
+        self._avt = None
+        self._rc = None
+        self._cm = None
+        self._last_position = None
+        self._last_duration = None
 
     async def shutdown_all(self) -> None:
         """应用退出清理：等待轮询退出，并停止所有当前媒体代理。"""

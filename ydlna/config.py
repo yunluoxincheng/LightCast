@@ -39,6 +39,7 @@ DEFAULTS: dict[str, Any] = {
     "window_geometry": None,
     # 窗口默认尺寸版本标记（每次调整默认尺寸时 +1，首次启动重置一次旧几何）
     "window_geometry_v6": False,
+    "window_geometry_v7": False,
     # 是否已提示过「关闭即最小化到托盘」
     "minimize_hint_shown": False,
     # 投屏 URL 是否允许指向内网私有地址（手机、NAS 等）。

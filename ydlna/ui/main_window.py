@@ -25,6 +25,28 @@ if TYPE_CHECKING:
 
 log = get_logger("ui.main")
 
+DEFAULT_WINDOW_SIZE = (1200, 800)
+WINDOW_GEOMETRY_VERSION_KEY = "window_geometry_v7"
+
+
+def _geometry_to_restore(config: Config) -> tuple[int, int, int, int] | None:
+    """返回可恢复的窗口几何；默认尺寸升级时丢弃一次旧尺寸。"""
+    if not config.get(WINDOW_GEOMETRY_VERSION_KEY, False):
+        # 先清掉旧尺寸再持久化版本标记：即使本次启动未正常 close，
+        # 下次也不会重新恢复迁移前保存的较小窗口。
+        config.set("window_geometry", None, persist=False)
+        config.set(WINDOW_GEOMETRY_VERSION_KEY, True)
+        return None
+
+    geom = config.get("window_geometry")
+    if not isinstance(geom, list) or len(geom) != 4:
+        return None
+    try:
+        x, y, width, height = (int(value) for value in geom)
+        return x, y, width, height
+    except (TypeError, ValueError):
+        return None
+
 
 class MainWindow(MSFluentWindow):
     """主窗口。"""
@@ -69,29 +91,13 @@ class MainWindow(MSFluentWindow):
         )
 
         self.setWindowTitle(APP_DISPLAY_NAME)
-        # 目标 ~1500×1000 屏幕物理像素（用户以屏幕像素理解窗口尺寸）。
-        # Qt 的 resize 用的是逻辑像素（与 DPI 无关），须按屏幕缩放换算：
-        # 125% 缩放 → 1500px 物理 = 1200 逻辑单位，显示出来才和预期一致。
-        # 屏幕物理区域不够大时按可用区收缩；几何版本号升级时替换一次旧几何
-        from PySide6.QtWidgets import QApplication
-        screen = QApplication.primaryScreen()
-        dpr = screen.devicePixelRatio() if screen is not None else 1.0
-        phys_w, phys_h = 1500, 1000
-        if screen is not None:
-            avail = screen.availableGeometry()
-            phys_w = min(phys_w, int(avail.width() * dpr) - 60)
-            phys_h = min(phys_h, int(avail.height() * dpr) - 80)
-        self.resize(int(phys_w / dpr), int(phys_h / dpr))
+        # Qt 的窗口几何使用逻辑像素；直接指定固定尺寸，不能再除以 DPR。
+        # 旧实现以 1500×1000 除缩放率，150% 下会变成 1000×666。
+        self.resize(*DEFAULT_WINDOW_SIZE)
         self.setMinimumSize(900, 600)
-        if not config.get("window_geometry_v6", False):
-            config.set("window_geometry_v6", True)
-        else:
-            geom = config.get("window_geometry")
-            if isinstance(geom, list) and len(geom) == 4:
-                try:
-                    self.setGeometry(*geom)
-                except Exception:  # noqa: BLE001
-                    pass
+        geom = _geometry_to_restore(config)
+        if geom is not None:
+            self.setGeometry(*geom)
 
         # 设置图标（若有）
         icon = self._load_icon()

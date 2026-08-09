@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：69 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、后台任务退出清理与 SSDP 线程生命周期；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：73 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障与窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -149,7 +149,7 @@
 ### H5. mpv 回调线程直接写 Python 实例状态 + shutdown 无同步
 
 - **文件**：`ydlna/player/mpv_player.py:190, 208-281`
-- **状态**：`[ ]`
+- **状态**：`[x]` 已修复（2026-08-10）：新增 `RLock` 统一保护播放器缓存字段的跨线程读写；所有 mpv property/event callback 在锁内检查 `_shutting_down`，状态更新与信号发射不会跨过 shutdown 屏障。`shutdown()` 先在锁内置关闭标志、切断 `_mpv` 与 attached 可见性，再在锁外调用会 join 事件线程的 `python-mpv terminate()`，避免死锁并确保返回后不再有回调写状态。新增测试模拟 terminate 过程中及返回后的晚到回调，验证缓存与 Qt 信号均不再变化。
 - **问题**：事件回调在 mpv 独立线程里，除了 emit 信号还**直接写**
   `self._position / _duration / _state / _last_error` 等字段，主线程并发读；`shutdown()` 把
   `self._mpv = None` 但无 barrier / flag 与事件线程同步，存在崩溃窗口。GIL 下单字段赋值原子，
@@ -334,7 +334,7 @@
 ### M20. `RendererBridge.shutdown` 未断开信号、未清 service 引用
 
 - **文件**：`ydlna/dlna/renderer_bridge.py:133, 324-325`
-- **状态**：`[ ]`
+- **状态**：`[x]` 已修复（2026-08-10）：`shutdown()` 会断开 player `stateChanged`、解除旧 service 的 bridge 双向引用并清空 `_avt/_rc/_cm`；`set_services()` 在 DLNA 服务重启时幂等地重新连接信号。新增测试验证停服后播放器状态不再写旧 AVTransport，重启后只连接一次并写入新 service。
 - **问题**：`shutdown` 只 `_stop_polling()`，没断 `stateChanged` 连接，也没清 `_avt / _rc / _cm`
     引用。重启 server 不重启 player 时，`_on_player_state` 会写到已 stop 的旧 service 上。
 - **建议**：`shutdown` 里 `disconnect` 信号，把 `_avt / _rc / _cm` 置 None。
