@@ -134,7 +134,36 @@ ISCC.exe /DMyAppVersion=1.2.0 packaging\installer.iss
 
 ### 3. 发布（GitHub Actions）
 
-推送 `v*` 标签即自动构建并发布 Release（安装版 + 便携版），Release 说明自动取自 [`CHANGELOG.md`](../CHANGELOG.md) 对应版本的小节。手动触发（workflow_dispatch）只出包不发布，产物挂在 run 的 Artifacts。
+发布版本由 [`CHANGELOG.md`](../CHANGELOG.md) 管理。每个准备合并到 `master` 的 PR 必须先在文件顶部新增严格的稳定版本小节：
+
+```markdown
+## [0.1.24] - 2026-08-11
+
+### 新增 / 修复 / 其他
+- 面向用户的完整更新内容
+```
+
+合并到 `master` 即表示批准发布。`Build & Release` 会先运行完整测试，再解析顶部版本、检查既有 tag/Release、构建安装版和便携版、生成 `SHA256SUMS.txt` 与完整 Release 正文；只有所有文件验证成功后，才创建指向该次 master 提交的 lightweight `vX.Y.Z` tag，并在**同一条 workflow run** 中发布 Release。不要在 PR 合并后再手工补 CHANGELOG，也不要为自动发布提前打 tag。
+
+事件行为：
+
+| 事件 | 测试 | 构建 | tag / Release |
+|---|---|---|---|
+| PR → `master` | 是 | 否 | 否 |
+| push / merge → `master` | 是 | 是 | 从 CHANGELOG 顶部自动创建并发布 |
+| push `v*` tag | 是 | 是 | 保留人工 tag 发布/恢复能力 |
+| `workflow_dispatch`（非 tag ref） | 是 | 是 | 不发布，产物上传到 Actions Artifacts |
+
+自动路径只接受 `X.Y.Z`，不接受 `v` 前缀、缺段、前导零或 `rc` / `beta` / `alpha` 后缀。对应 CHANGELOG 小节必须存在且正文非空，失败时不会生成“更新内容见 CHANGELOG.md”之类的占位说明。
+
+发布以 `tag + commit SHA` 为幂等边界：
+
+- tag 不存在：构建完成后创建并发布；
+- tag 指向当前提交且 Release 已存在：安全 no-op；
+- tag 指向当前提交但 Release 缺失：重跑会重建产物并恢复 Release；
+- tag 指向其他提交：失败并要求提升 CHANGELOG 版本，绝不移动现有 tag。
+
+多个发布 build 使用固定 concurrency group，并通过 `queue: max` 保留最多 100 个等待任务，按进入等待队列的顺序串行执行且不互相取消。自动 tag 使用当前 run 的短期 `GITHUB_TOKEN` 创建；GitHub 不会让该 token 产生的 tag push 递归触发另一条 workflow，因此 Release 也由当前 run 直接创建。流程不需要 PAT、GitHub App 或新增仓库 secret。
 
 ### 4. 自动更新（`ydlna/updater.py`）
 
