@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-11）：91 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、HLS 启动/后台预热及缓存 single-flight、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-11）：108 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、HLS 启动/后台预热、缓存 single-flight 与代理路由索引校验、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 时间/错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -230,8 +230,8 @@
 
 ### M7. `int(request.match_info["index"])` 未校验 + 负索引静默错位
 
-- **文件**：`ydlna/player/hls_rewriter.py:461, 467, 480, 511, 595`
-- **状态**：`[ ]`
+- **文件**：`ydlna/player/hls_rewriter.py:141-153, 625-727, 855-864`
+- **状态**：`[x]` 已修复（2026-08-11）：所有分片、AES key 和初始化段路由统一使用 `[0-9]+` ASCII 白名单，使字母、负数、显式正号和 Unicode 数字在进入 handler 前直接 404；handler 仍通过 `_route_index()` 二次校验非空 ASCII 十进制格式、整数转换和 `0 <= index < len(resource)`，超长整数触发 Python 安全位数限制时也收口为 404。测试覆盖五类 handler 以及 aiohttp 实际路由，确保非法输入不触发上游访问，合法索引与前导零保持可用。
 - **问题**：路由 `{index}.mp4` 默认匹配 `[^/]+`。`/seg/abc.mp4` → `int("abc")` 抛 500；`/seg/-1.mp4`
   → `self._segments[-1]` 静默取到最后一个分片（Python 负索引），返回错误内容。
 - **建议**：路由正则 `{index:\d+}.mp4`；handler 内 `if index < 0 or index >= len(...): return 404`。
