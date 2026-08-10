@@ -578,6 +578,8 @@ class HlsProxy(_BaseProxy):
         # hybrid 模式：PNG 封面 + TS 视频混合分片 → 剥前缀缓存
         self._ts_cache: dict[int, bytes] = {}
         self._ts_cache_order: list[int] = []
+        # 标记由低重试后台预热创建的 flight，供前台失败后升级接管。
+        self._hybrid_warm_flights: dict[int, asyncio.Task[bool]] = {}
 
     async def start(self, segments: list[str], playlist: str,
                     keys: Optional[list[str]] = None,
@@ -603,6 +605,7 @@ class HlsProxy(_BaseProxy):
         self._jpeg_cache_order = []
         self._ts_cache = {}
         self._ts_cache_order = []
+        self._hybrid_warm_flights = {}
         self._referer = referer
         await super().start("")
 
@@ -710,13 +713,33 @@ class HlsProxy(_BaseProxy):
         *,
         retries: int = 1,
     ) -> bool:
-        """等待该分片唯一的抓取任务，预热与播放器请求共享结果。"""
+        """共享分片抓取；低重试预热失败后允许前台用完整策略接管。"""
         if index in self._ts_cache:
             return True
-        return await self._singleflight(
-            ("hybrid", index),
+
+        key = ("hybrid", index)
+        existing = self._inflight.get(key)
+        joined_warm = (
+            request is not None
+            and retries > 0
+            and self._hybrid_warm_flights.get(index) is existing
+        )
+        ok = await self._singleflight(
+            key,
             lambda: self._buffer_hybrid(index, request, retries=retries),
             name=f"load-hls-segment-{index}",
+        )
+        if ok or not joined_warm:
+            return ok
+
+        # 预热用 retries=0 且没有播放器请求头。前台先等待它，失败后再按
+        # 自身 headers/retries 串行建立（或加入）新的 flight，保留恢复机会。
+        if self._inflight.get(key) is existing:
+            self._inflight.pop(key, None)
+        return await self._singleflight(
+            key,
+            lambda: self._buffer_hybrid(index, request, retries=retries),
+            name=f"load-hls-segment-{index}-foreground",
         )
 
     async def _buffer_hybrid(
@@ -773,11 +796,20 @@ class HlsProxy(_BaseProxy):
             key = ("hybrid", nxt)
             if key in self._inflight:
                 continue
-            self._singleflight_task(
+            task = self._singleflight_task(
                 key,
                 lambda nxt=nxt: self._buffer_hybrid(nxt, retries=0),
                 name=f"warm-hls-segment-{nxt}",
             )
+            self._hybrid_warm_flights[nxt] = task
+
+            def clear_warm(
+                done: asyncio.Task[Any], *, segment: int = nxt
+            ) -> None:
+                if self._hybrid_warm_flights.get(segment) is done:
+                    self._hybrid_warm_flights.pop(segment, None)
+
+            task.add_done_callback(clear_warm)
 
     async def _warm_hybrid_startup(self) -> None:
         """启动期只等待首片，后续分片交给受管后台任务预取。"""
