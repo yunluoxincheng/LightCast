@@ -122,9 +122,11 @@ _BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
-# 请求超时（内部小请求 15s，整段缓冲 60s；转发流式请求不设上限）
+# 请求超时：内部小请求 15s，整段缓冲 60s；流式转发允许长时间播放，
+# 但连接/连接池等待最多 10s，任意两次上游读之间最多等待 30s。
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
 _TIMEOUT_BIG = aiohttp.ClientTimeout(total=60)
+_TIMEOUT_FORWARD = aiohttp.ClientTimeout(total=None, connect=10, sock_read=30)
 
 
 def _origin(url: str) -> str:
@@ -436,6 +438,7 @@ class _BaseProxy:
                 # safe_get 关自动重定向 + 每跳 URL 校验，SSRF 由连接器兜底
                 resp = await safe_get(
                     self._session, real_url, headers=headers,
+                    timeout=_TIMEOUT_FORWARD,
                     allow_intranet=self._allow_intranet,
                 )
             except UrlBlockedError as e:
@@ -460,7 +463,19 @@ class _BaseProxy:
             resp.close()
             return web.Response(status=status, text="upstream error")
         # 先取前 4KB 判断是否为 HTML 错误页（防盗链/登录墙常 200 返回 HTML）
-        first = await resp.content.read(4096)
+        try:
+            first = await resp.content.read(4096)
+        except asyncio.CancelledError:
+            resp.close()
+            raise
+        except asyncio.TimeoutError:
+            log.warning("%s上游读取超时: %s", what, real_url)
+            resp.close()
+            return web.Response(status=504, text="upstream timeout")
+        except (aiohttp.ClientError, ConnectionError, OSError) as e:
+            log.warning("%s上游读取失败: %s (%s)", what, real_url, e)
+            resp.close()
+            return web.Response(status=502, text="upstream read error")
         if first and _looks_html(first):
             log.warning("%s上游返回 HTML 页面（疑似登录墙/防盗链页）: %s",
                         what, real_url)
@@ -482,7 +497,12 @@ class _BaseProxy:
                 except (ConnectionResetError, ConnectionError, OSError):
                     log.debug("客户端提前断开（正常）")
                     break
-        except (ConnectionResetError, asyncio.CancelledError, ConnectionError):
+        except asyncio.TimeoutError:
+            log.warning("%s上游流式读取超时: %s", what, real_url)
+        except asyncio.CancelledError:
+            log.debug("%s传输中断", what)
+            raise
+        except (aiohttp.ClientError, ConnectionResetError, ConnectionError, OSError):
             log.debug("%s传输中断", what)
         finally:
             resp.close()
