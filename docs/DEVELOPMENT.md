@@ -143,7 +143,7 @@ ISCC.exe /DMyAppVersion=1.2.0 packaging\installer.iss
 - 面向用户的完整更新内容
 ```
 
-合并到 `master` 即表示批准发布。`Build & Release` 会先运行完整测试，再解析顶部版本、检查既有 tag/Release、构建安装版和便携版、生成 `SHA256SUMS.txt` 与完整 Release 正文；只有所有文件验证成功后，才创建指向该次 master 提交的 lightweight `vX.Y.Z` tag，并在**同一条 workflow run** 中发布 Release。不要在 PR 合并后再手工补 CHANGELOG，也不要为自动发布提前打 tag。
+合并到 `master` 即表示批准发布。`Build & Release` 会先运行完整测试并静态解析顶部版本；发布 job 取得 concurrency 锁后才读取最新的 tag/Release 状态，然后构建安装版和便携版、生成 `SHA256SUMS.txt` 与完整 Release 正文。只有所有文件验证成功后，才创建指向该次 master 提交的 lightweight `vX.Y.Z` tag，并在**同一条 workflow run** 中发布 Release。不要在 PR 合并后再手工补 CHANGELOG，也不要为自动发布提前打 tag。
 
 事件行为：
 
@@ -159,11 +159,12 @@ ISCC.exe /DMyAppVersion=1.2.0 packaging\installer.iss
 发布以 `tag + commit SHA` 为幂等边界：
 
 - tag 不存在：构建完成后创建并发布；
-- tag 指向当前提交且 Release 已存在：安全 no-op；
+- tag 指向当前提交且正式 Release 已存在：安全 no-op；
 - tag 指向当前提交但 Release 缺失：重跑会重建产物并恢复 Release；
+- tag 指向当前提交且 Release 仍为 draft：重跑会固定其数字 ID，并在上传前再次确认同 tag 且仍为 draft，再用 `--clobber` 覆盖三项预期资产，修正标题/正文后转为正式 Release；
 - tag 指向其他提交：失败并要求提升 CHANGELOG 版本，绝不移动现有 tag。
 
-多个发布 build 使用固定 concurrency group，并通过 `queue: max` 保留最多 100 个等待任务，按进入等待队列的顺序串行执行且不互相取消。自动 tag 使用当前 run 的短期 `GITHUB_TOKEN` 创建；GitHub 不会让该 token 产生的 tag push 递归触发另一条 workflow，因此 Release 也由当前 run 直接创建。流程不需要 PAT、GitHub App 或新增仓库 secret。
+多个发布 build 使用固定 concurrency group，并通过 `queue: max` 保留最多 100 个等待任务，按进入等待队列的顺序串行执行且不互相取消。所有远端可变状态都在取得锁后重新读取；发布前还会再次确认 tag 存在并精确指向当前 run 的 SHA，`gh release create/edit` 均要求 `--verify-tag`，不会隐式创建或移动标签。自动 tag 使用当前 run 的短期 `GITHUB_TOKEN` 创建；GitHub 不会让该 token 产生的 tag push 递归触发另一条 workflow，因此 Release 也由当前 run 直接创建。流程不需要 PAT、GitHub App 或新增仓库 secret。
 
 ### 4. 自动更新（`ydlna/updater.py`）
 

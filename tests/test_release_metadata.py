@@ -9,6 +9,7 @@ import pytest
 from tools.release_metadata import (
     ReleaseMetadataError,
     ReleaseState,
+    ReleaseStatus,
     classify_release_state,
     extract_latest_release,
     extract_release,
@@ -100,25 +101,28 @@ def test_validate_version_accepts_stable_semver(version: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("tag_sha", "release_exists", "expected"),
+    ("tag_sha", "release_status", "expected"),
     [
-        (None, False, ReleaseState.NEW),
-        ("abc123", False, ReleaseState.RECOVER_RELEASE),
-        ("abc123", True, ReleaseState.ALREADY_RELEASED),
-        ("older", False, ReleaseState.CONFLICT),
-        ("older", True, ReleaseState.CONFLICT),
+        (None, ReleaseStatus.MISSING, ReleaseState.NEW),
+        (None, ReleaseStatus.DRAFT, ReleaseState.CONFLICT),
+        ("abc123", ReleaseStatus.MISSING, ReleaseState.RECOVER_RELEASE),
+        ("abc123", ReleaseStatus.DRAFT, ReleaseState.RECOVER_DRAFT),
+        ("abc123", ReleaseStatus.PUBLISHED, ReleaseState.ALREADY_RELEASED),
+        ("abc123", ReleaseStatus.PRERELEASE, ReleaseState.CONFLICT),
+        ("older", ReleaseStatus.MISSING, ReleaseState.CONFLICT),
+        ("older", ReleaseStatus.PUBLISHED, ReleaseState.CONFLICT),
     ],
 )
 def test_classify_release_state(
     tag_sha: str | None,
-    release_exists: bool,
+    release_status: ReleaseStatus,
     expected: ReleaseState,
 ) -> None:
     assert (
         classify_release_state(
             tag_sha=tag_sha,
             current_sha="abc123",
-            release_exists=release_exists,
+            release_status=release_status,
         )
         is expected
     )
@@ -155,3 +159,33 @@ def test_changelog_cli_writes_notes_and_single_line_outputs(tmp_path: Path) -> N
         "## [0.1.24] - 2026-08-11\n\n### 新增\n- 自动发布\n"
     )
     assert output.read_text(encoding="utf-8") == "version=0.1.24\ntag=v0.1.24\n"
+
+
+def test_interrupted_draft_release_can_recover_then_become_idempotent() -> None:
+    assert classify_release_state(
+        tag_sha="abc123",
+        current_sha="abc123",
+        release_status=ReleaseStatus.DRAFT,
+    ) is ReleaseState.RECOVER_DRAFT
+
+    assert classify_release_state(
+        tag_sha="abc123",
+        current_sha="abc123",
+        release_status=ReleaseStatus.PUBLISHED,
+    ) is ReleaseState.ALREADY_RELEASED
+
+
+def test_waiter_rechecks_remote_state_after_earlier_run_publishes() -> None:
+    stale_state = classify_release_state(
+        tag_sha=None,
+        current_sha="abc123",
+        release_status=ReleaseStatus.MISSING,
+    )
+    latest_state = classify_release_state(
+        tag_sha="abc123",
+        current_sha="abc123",
+        release_status=ReleaseStatus.PUBLISHED,
+    )
+
+    assert stale_state is ReleaseState.NEW
+    assert latest_state is ReleaseState.ALREADY_RELEASED

@@ -30,8 +30,16 @@ class ReleaseMetadataError(ValueError):
 class ReleaseState(str, Enum):
     NEW = "new"
     RECOVER_RELEASE = "recover_release"
+    RECOVER_DRAFT = "recover_draft"
     ALREADY_RELEASED = "already_released"
     CONFLICT = "conflict"
+
+
+class ReleaseStatus(str, Enum):
+    MISSING = "missing"
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    PRERELEASE = "prerelease"
 
 
 @dataclass(frozen=True)
@@ -122,18 +130,34 @@ def extract_release(text: str, version: str) -> ReleaseMetadata:
 
 
 def classify_release_state(
-    *, tag_sha: str | None, current_sha: str, release_exists: bool
+    *,
+    tag_sha: str | None,
+    current_sha: str,
+    release_status: ReleaseStatus | str,
 ) -> ReleaseState:
     """Classify whether a release is new, recoverable, complete, or conflicting."""
     if not current_sha:
         raise ValueError("current_sha must not be empty")
+    try:
+        status = ReleaseStatus(release_status)
+    except ValueError as exc:
+        raise ValueError(f"unknown release status: {release_status!r}") from exc
+
     if not tag_sha:
-        return ReleaseState.NEW
+        return (
+            ReleaseState.NEW
+            if status is ReleaseStatus.MISSING
+            else ReleaseState.CONFLICT
+        )
     if tag_sha != current_sha:
         return ReleaseState.CONFLICT
-    if release_exists:
+    if status is ReleaseStatus.PUBLISHED:
         return ReleaseState.ALREADY_RELEASED
-    return ReleaseState.RECOVER_RELEASE
+    if status is ReleaseStatus.DRAFT:
+        return ReleaseState.RECOVER_DRAFT
+    if status is ReleaseStatus.MISSING:
+        return ReleaseState.RECOVER_RELEASE
+    return ReleaseState.CONFLICT
 
 
 def _write_github_output(path: Path | None, values: dict[str, str]) -> None:
@@ -166,7 +190,7 @@ def _command_state(args: argparse.Namespace) -> None:
     state = classify_release_state(
         tag_sha=args.tag_sha or None,
         current_sha=args.current_sha,
-        release_exists=args.release_exists,
+        release_status=args.release_status,
     )
     _write_github_output(args.github_output, {"release_state": state.value})
     print(state.value)
@@ -187,9 +211,9 @@ def _build_parser() -> argparse.ArgumentParser:
     state.add_argument("--tag-sha", default="")
     state.add_argument("--current-sha", required=True)
     state.add_argument(
-        "--release-exists",
-        action=argparse.BooleanOptionalAction,
-        default=False,
+        "--release-status",
+        choices=[status.value for status in ReleaseStatus],
+        default=ReleaseStatus.MISSING.value,
     )
     state.add_argument("--github-output", type=Path)
     state.set_defaults(handler=_command_state)

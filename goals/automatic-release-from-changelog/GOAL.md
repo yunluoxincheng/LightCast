@@ -102,14 +102,15 @@ GitHub Actions 行为要求：
 
 1. `candidate`：收到 master push、tag push 或 workflow_dispatch。
 2. `tests_passed`：完整 pytest 成功。
-3. `version_validated`：版本、CHANGELOG notes 和远端 tag/release 状态已验证。
+3. `version_validated`：版本与 CHANGELOG notes 已验证；发布 job 取得 concurrency 锁后，远端 tag/release 最新状态也已验证。
 4. `building`：正在构建 exe、便携包、安装包、校验和和 notes。
 5. `artifacts_ready`：全部发布产物已生成并验证。
 6. `tag_created`：自动路径已创建 lightweight tag；手动 tag 路径视为已有 tag。
 7. `released`：Release 和三项资产上传完成。
-8. `already_released`：同一 tag 已指向当前提交且对应 Release 已存在，幂等成功。
-9. `manual_artifact_ready`：非 tag workflow_dispatch 只上传 Actions artifact。
-10. `failed`：任一步骤失败。
+8. `already_released`：同一 tag 已指向当前提交且对应正式 Release 已存在，幂等成功。
+9. `draft_recovery`：同一 tag 已指向当前提交，但上次资产上传中断留下 draft Release，正在覆盖补齐资产并正式发布。
+10. `manual_artifact_ready`：非 tag workflow_dispatch 只上传 Actions artifact。
+11. `failed`：任一步骤失败。
 
 初始状态：`candidate`。
 
@@ -120,11 +121,13 @@ GitHub Actions 行为要求：
 - `candidate → tests_passed`
 - `tests_passed → version_validated`
 - `version_validated → already_released`
+- `version_validated → draft_recovery`
 - `version_validated → building`
 - `building → artifacts_ready`
 - `artifacts_ready → tag_created`（master 自动路径）
 - `artifacts_ready → released`（已有且正确的 tag 恢复路径）
 - `tag_created → released`
+- `draft_recovery → released`
 - `artifacts_ready → manual_artifact_ready`（非 tag workflow_dispatch）
 - 任意非终止状态在校验或命令失败时 `→ failed`
 
@@ -140,6 +143,7 @@ GitHub Actions 行为要求：
 - `artifacts_ready → tag_created`：workflow 使用 `GITHUB_TOKEN` 创建 `vX.Y.Z` 指向 `github.sha`。
 - `tag_created/artifacts_ready → released`：`gh release create` 上传三项资产并使用 notes 文件。
 - tag 已指向当前提交但 Release 不存在：属于恢复路径，允许重建产物后发布，不重新创建 tag。
+- tag 已指向当前提交但 Release 为 draft：固定 Release 数字 ID，重建产物并在覆盖前再次确认同 tag 且仍为 draft，使用 `gh release upload --clobber` 覆盖三项预期资产，再修正标题/正文并执行 `gh release edit --draft=false --verify-tag` 正式发布。
 
 ## 10. 错误处理要求
 
@@ -148,22 +152,24 @@ GitHub Actions 行为要求：
 3. 对应 CHANGELOG 小节缺失/为空：失败；不得使用占位 release notes。
 4. `vX.Y.Z` 不存在：正常新版本路径。
 5. tag 已存在且指向当前提交：
-   - Release 已存在：幂等成功，不重复上传。
+   - 正式 Release 已存在：幂等成功，不重复上传。
    - Release 不存在：进入恢复构建/发布路径。
+   - Release 为 draft：进入 draft 恢复路径，覆盖预期资产后正式发布。
 6. tag 已存在但指向其他提交：失败并提示必须提升 CHANGELOG 版本；绝不移动或覆盖 tag。
 7. tag 创建遇到并发冲突：重新读取 tag；若指向当前提交则继续，否则失败。
 8. 测试/下载 libmpv/打包/校验和/notes 生成失败：失败且不得创建 tag。
 9. tag 创建后 Release 发布失败：保留 tag；重新运行同一 workflow 时必须能恢复发布。
-10. Release 资产缺失：`gh release create` 前失败，不能发布不完整 Release。
+10. Release 资产缺失：发布命令前失败，不能发布不完整 Release；draft 恢复同样必须先验证本地三项资产。
 11. GitHub API/网络暂时失败：让 job 失败并保留可重跑性，不吞异常。
 
 ## 11. 并发与一致性
 
 - 一致性边界：一个 release run 的版本、tag、SHA256SUMS、资产名和 Release notes 必须全部使用同一个解析出的 `X.Y.Z` 与同一个源提交 SHA。
 - 幂等键：`tag name + target commit SHA`。
-- 发布串行化：build/release job 使用固定 concurrency group（例如 `lightcast-release`）、`queue: max` 和 `cancel-in-progress: false`，使多个快速 master push 的发布阶段进入多任务等待队列、顺序执行且不互相取消。
+- 发布串行化：build/release job 使用固定 concurrency group（例如 `lightcast-release`）、`queue: max` 和 `cancel-in-progress: false`，使多个快速 master push 的发布阶段进入多任务等待队列、顺序执行且不互相取消；tag SHA、Release 缺失/draft/正式状态只能在 job 取得该锁后查询和决策。
 - PR test 不应被发布 concurrency group 串行阻塞；concurrency 应放在 build/release job，而不是整个 workflow。
 - tag 创建使用 Git/GitHub 的原子 ref 创建；不得先删除再创建。
+- Release 创建和 draft 正式发布都必须使用 `--verify-tag`，且此前再次核验远端 tag 的解析后 commit SHA 等于 `github.sha`；禁止 GitHub CLI 隐式创建标签。
 - 需要防御的竞态：
   1. 两个 run 同时判断 tag 不存在并尝试创建。
   2. 第一个 run 创建 tag 后、发布 Release 前失败，第二次重跑接管。
@@ -220,37 +226,39 @@ GitHub Actions 行为要求：
 4. 自动流程在同一 run 内创建正式 Release，不依赖 tag push 启动第二个 run。
 5. Release 标题、正文、安装包、便携包和 SHA256SUMS 均使用同一个版本。
 6. Release 正文与 CHANGELOG 对应版本小节完整一致，无占位文案。
-7. 测试或任一构建步骤失败时远端不存在新 tag 和 Release。
-8. tag 已指向当前提交且 Release 已存在时，重跑安全成功且不重复创建资产/Release。
+7. 测试或 tag 创建前的任一构建/验证步骤失败时远端不存在新 tag 和 Release；tag 创建后的资产上传失败允许留下同 SHA tag 与 draft Release，但重跑必须进入可恢复路径，不能误判完成。
+8. tag 已指向当前提交且正式 Release 已存在时，重跑安全成功且不重复创建资产/Release。
 9. tag 已指向当前提交但 Release 缺失时，重跑可以恢复发布。
-10. tag 已指向其他提交时 workflow 失败且不移动 tag。
-11. master 新提交忘记提升 CHANGELOG 版本时 workflow 明确失败。
-12. 多个发布 run 使用 `queue: max` 保留等待任务，不会因默认的 single pending 规则互相替换取消，发布阶段按进入等待队列的顺序执行。
-13. 手动 `v*` tag 发布仍正常。
-14. 非 tag workflow_dispatch 仍只构建/上传 artifact，不发布。
-15. 自动路径拒绝预发布版本格式。
-16. 不需要新增 secret，权限保持最小化。
-17. 完整 pytest、workflow 相关测试和 `git diff --check` 通过。
-18. 首次真实自动发布完成后，GitHub 上可核验 tag、Release 正文和三项资产。
+10. tag 已指向当前提交但 Release 为 draft 时，重跑可以覆盖补齐三项资产并正式发布。
+11. tag 已指向其他提交时 workflow 失败且不移动 tag。
+12. master 新提交忘记提升 CHANGELOG 版本时 workflow 明确失败。
+13. 多个发布 run 使用 `queue: max` 保留等待任务，不会因默认的 single pending 规则互相替换取消；取得锁后重新读取远端状态，前一任务已发布时后一任务幂等结束。
+14. 手动 `v*` tag 发布仍正常。
+15. 非 tag workflow_dispatch 仍只构建/上传 artifact，不发布。
+16. 自动路径拒绝预发布版本格式，稳定 tag 对应非 draft prerelease 时也拒绝自动覆盖。
+17. 不需要新增 secret，权限保持最小化。
+18. 完整 pytest、workflow 相关测试和 `git diff --check` 通过。
+19. 首次真实自动发布完成后，GitHub 上可核验 tag、Release 正文和三项资产。
 
 ## 16. 测试要求
 
 1. 单元测试 CHANGELOG 顶部稳定版本提取。
 2. 单元测试正文提取在下一版本标题前结束。
 3. 测试缺失标题、格式错误、空 notes、预发布后缀被拒绝。
-4. 测试版本/tag 状态分类：不存在、同 SHA+有 Release、同 SHA+无 Release、不同 SHA。
-5. 测试超长/异常版本文本不会被接受或执行为 shell 内容。
-6. 验证 PR workflow run：test success、build skipped。
-7. 在 PR 中通过纯逻辑测试验证 master 自动分支；禁止在 PR 测试中真的创建 tag/Release。
-8. 合并后的首次真实演练：
+4. 测试版本/tag 状态分类：不存在、同 SHA+正式 Release、同 SHA+无 Release、同 SHA+draft、prerelease 和不同 SHA。
+5. 测试资产上传中断留下 draft 后，下一次状态判定进入恢复而不是已发布；测试等待任务取得锁后使用最新正式状态幂等结束。
+6. 测试超长/异常版本文本不会被接受或执行为 shell 内容。
+7. 验证 PR workflow run：test success、build skipped。
+8. 在 PR 中通过纯逻辑测试验证 master 自动分支；禁止在 PR 测试中真的创建 tag/Release。
+9. 合并后的首次真实演练：
    - 观察 master push workflow；
    - 核对 test/build 成功；
    - 核对 tag SHA；
    - 核对 Release 不是 draft/prerelease；
    - 核对三项资产存在；
    - 核对 Release body 等于 CHANGELOG 小节。
-9. 失败演练应使用纯逻辑测试或安全的 dry-run，不得创建垃圾 tag。
-10. 若 workflow YAML 缺少本地 schema 工具，至少执行 `git diff --check`、pytest，并通过 GitHub PR run 验证语法可加载。
+10. 失败演练应使用纯逻辑测试或安全的 dry-run，不得创建垃圾 tag。
+11. 若 workflow YAML 缺少本地 schema 工具，至少执行 `git diff --check`、pytest，并通过 GitHub PR run 验证语法可加载。
 
 ## 17. 禁止操作
 

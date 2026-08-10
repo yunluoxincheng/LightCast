@@ -49,10 +49,6 @@ jobs:
       mode: ${{ steps.plan.outputs.mode }}
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
-      release_state: ${{ steps.plan.outputs.release_state }}
-      should_build: ${{ steps.plan.outputs.should_build }}
-      should_create_tag: ${{ steps.plan.outputs.should_create_tag }}
-      should_publish: ${{ steps.plan.outputs.should_publish }}
 
     steps:
       - uses: actions/checkout@v5
@@ -64,10 +60,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Resolve and validate release plan
+      - name: Resolve static release metadata
         id: plan
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and $env:GITHUB_REF_TYPE -ne 'tag') {
@@ -75,10 +69,6 @@ jobs:
               'mode=manual'
               'version=0.1.0'
               'tag='
-              'release_state=manual'
-              'should_build=true'
-              'should_create_tag=false'
-              'should_publish=false'
             ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             exit 0
           }
@@ -100,77 +90,13 @@ jobs:
               --github-output $env:GITHUB_OUTPUT
           }
           if ($LASTEXITCODE -ne 0) { throw 'CHANGELOG 版本或 Release 正文校验失败' }
-          $version = $version.Trim()
-
-          $tag = "v$version"
-          $tagSha = ''
-          $existingTag = git tag --list $tag
-          if ($LASTEXITCODE -ne 0) { throw "读取标签 $tag 失败" }
-          if ($existingTag) {
-            $tagSha = (git rev-list -n 1 $tag).Trim()
-            if ($LASTEXITCODE -ne 0) { throw "解析标签 $tag 指向的提交失败" }
-          }
-
-          $query = ".[] | select(.tag_name == `"$tag`") | .tag_name"
-          $matchingReleases = @(gh api --paginate `
-            "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" `
-            --jq $query)
-          if ($LASTEXITCODE -ne 0) { throw '读取 GitHub Release 状态失败' }
-          $releaseExists = $matchingReleases -contains $tag
-
-          $stateArgs = @(
-            'tools/release_metadata.py'
-            'state'
-            '--current-sha'
-            $env:GITHUB_SHA
-          )
-          if ($tagSha) { $stateArgs += @('--tag-sha', $tagSha) }
-          if ($releaseExists) {
-            $stateArgs += '--release-exists'
-          } else {
-            $stateArgs += '--no-release-exists'
-          }
-          $releaseState = python @stateArgs
-          if ($LASTEXITCODE -ne 0) { throw '发布状态分类失败' }
-          $releaseState = $releaseState.Trim()
-
-          $shouldBuild = 'true'
-          $shouldCreateTag = 'false'
-          $shouldPublish = 'true'
-          switch ($releaseState) {
-            'new' {
-              if ($mode -ne 'automatic') {
-                throw "标签事件引用的 $tag 在 checkout 中不存在"
-              }
-              $shouldCreateTag = 'true'
-            }
-            'recover_release' {
-              Write-Host "$tag 已指向当前提交但 Release 缺失，将重建产物并恢复发布"
-            }
-            'already_released' {
-              $shouldBuild = 'false'
-              $shouldPublish = 'false'
-              Write-Host "$tag 及其 Release 已存在且指向当前提交，无需重复发布"
-            }
-            'conflict' {
-              throw "$tag 已指向 $tagSha，而当前提交为 $env:GITHUB_SHA；请提升 CHANGELOG 版本，现有标签不会被移动"
-            }
-            default { throw "未知发布状态: $releaseState" }
-          }
-
-          @(
-            "mode=$mode"
-            "release_state=$releaseState"
-            "should_build=$shouldBuild"
-            "should_create_tag=$shouldCreateTag"
-            "should_publish=$shouldPublish"
-          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "mode=$mode" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   build:
     if: >-
       github.event_name != 'pull_request' &&
       needs.test.result == 'success' &&
-      needs.metadata.outputs.should_build == 'true'
+      needs.metadata.result == 'success'
     needs:
       - test
       - metadata
@@ -193,13 +119,120 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      # 远端 tag/Release 会在等待 concurrency 队列期间变化，因此必须在
+      # 取得发布锁以后查询，不能复用 metadata job 的旧快照。
+      - name: Resolve current remote release state
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          if ('${{ needs.metadata.outputs.mode }}' -eq 'manual') {
+            @(
+              'release_state=manual'
+              'should_build=true'
+              'should_create_tag=false'
+              'should_publish=false'
+              'should_recover_draft=false'
+              'release_id='
+            ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+
+          $tag = '${{ needs.metadata.outputs.tag }}'
+          $tagRefs = @(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")
+          if ($LASTEXITCODE -ne 0) { throw "读取远端标签 $tag 失败" }
+          $tagSha = ''
+          if ($tagRefs.Count -gt 0) {
+            $peeled = @($tagRefs | Where-Object { $_.EndsWith('^{}') })
+            $selected = if ($peeled.Count -gt 0) { $peeled[0] } else { $tagRefs[0] }
+            $tagSha = ($selected -split "`t")[0]
+          }
+
+          $query = ".[] | select(.tag_name == `"$tag`") | [.id, .draft, .prerelease] | @tsv"
+          $releaseRows = @(gh api --paginate `
+            "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" `
+            --jq $query)
+          if ($LASTEXITCODE -ne 0) { throw '读取 GitHub Release 状态失败' }
+          if ($releaseRows.Count -gt 1) { throw "$tag 存在多个 Release，拒绝自动处理" }
+
+          $releaseStatus = 'missing'
+          $releaseId = ''
+          if ($releaseRows.Count -eq 1) {
+            $releaseFields = $releaseRows[0] -split "`t"
+            if ($releaseFields.Count -ne 3) { throw "$tag 的 Release 状态格式异常" }
+            $releaseId = $releaseFields[0]
+            if ($releaseId -notmatch '^[0-9]+$') { throw "$tag 的 Release ID 非法" }
+            if ($releaseFields[1] -eq 'true') {
+              $releaseStatus = 'draft'
+            } elseif ($releaseFields[2] -eq 'true') {
+              $releaseStatus = 'prerelease'
+            } else {
+              $releaseStatus = 'published'
+            }
+          }
+
+          $stateArgs = @(
+            'tools/release_metadata.py'
+            'state'
+            '--current-sha'
+            $env:GITHUB_SHA
+            '--release-status'
+            $releaseStatus
+          )
+          if ($tagSha) { $stateArgs += @('--tag-sha', $tagSha) }
+          $releaseState = python @stateArgs
+          if ($LASTEXITCODE -ne 0) { throw '发布状态分类失败' }
+          $releaseState = $releaseState.Trim()
+
+          $shouldBuild = 'true'
+          $shouldCreateTag = 'false'
+          $shouldPublish = 'true'
+          $shouldRecoverDraft = 'false'
+          switch ($releaseState) {
+            'new' {
+              if ('${{ needs.metadata.outputs.mode }}' -ne 'automatic') {
+                throw "标签事件引用的 $tag 在远端不存在"
+              }
+              $shouldCreateTag = 'true'
+            }
+            'recover_release' {
+              Write-Host "$tag 已指向当前提交但 Release 缺失，将重建产物并恢复发布"
+            }
+            'recover_draft' {
+              $shouldRecoverDraft = 'true'
+              Write-Host "$tag 存在未完成的 draft Release，将重建并覆盖资产后正式发布"
+            }
+            'already_released' {
+              $shouldBuild = 'false'
+              $shouldPublish = 'false'
+              Write-Host "$tag 及其正式 Release 已存在且指向当前提交，无需重复发布"
+            }
+            'conflict' {
+              throw "$tag 状态冲突（tag SHA='$tagSha', Release='$releaseStatus', current='$env:GITHUB_SHA'）；请人工检查，现有标签和 Release 不会被修改"
+            }
+            default { throw "未知发布状态: $releaseState" }
+          }
+
+          @(
+            "release_state=$releaseState"
+            "release_status=$releaseStatus"
+            "release_id=$releaseId"
+            "should_build=$shouldBuild"
+            "should_create_tag=$shouldCreateTag"
+            "should_publish=$shouldPublish"
+            "should_recover_draft=$shouldRecoverDraft"
+          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Install dependencies
+        if: steps.state.outputs.should_build == 'true'
         run: pip install -r requirements.txt pyinstaller
 
       # libmpv-2.dll（约 110MB，不纳入仓库）：从 SourceForge 的 libmpv 目录
       # 拉 RSS 取最新一个 dev 构建包，解压出 dll 放到 bin/
       # 注意：优先标准版（非 v3），v3 精简版不含独立 dll
       - name: Download libmpv-2.dll
+        if: steps.state.outputs.should_build == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path bin | Out-Null
@@ -224,6 +257,7 @@ jobs:
 
       # 让「关于」页的版本号与 Release 标签一致
       - name: Sync app version
+        if: steps.state.outputs.should_build == 'true'
         shell: pwsh
         run: |
           $ver = '${{ needs.metadata.outputs.version }}'
@@ -233,9 +267,11 @@ jobs:
           Set-Content -Encoding UTF8 -Path $path -Value $content -NoNewline
 
       - name: Build exe (PyInstaller)
+        if: steps.state.outputs.should_build == 'true'
         run: pyinstaller LightCast.spec --noconfirm
 
       - name: Verify artifact
+        if: steps.state.outputs.should_build == 'true'
         shell: pwsh
         run: |
           if (-not (Test-Path 'dist\LightCast\LightCast.exe')) {
@@ -243,6 +279,7 @@ jobs:
           }
 
       - name: Pack portable zip
+        if: steps.state.outputs.should_build == 'true'
         shell: pwsh
         run: |
           $ver = '${{ needs.metadata.outputs.version }}'
@@ -250,6 +287,7 @@ jobs:
           Write-Host "便携版: LightCast-Portable-$ver.zip"
 
       - name: Build installer (Inno Setup)
+        if: steps.state.outputs.should_build == 'true'
         shell: pwsh
         run: |
           choco install innosetup --yes --no-progress
@@ -259,6 +297,7 @@ jobs:
       # 生成 SHA256SUMS.txt：客户端自动更新只信任 GitHub 直连取的这个校验和，
       # 下载（可经加速镜像）落地后强制比对，挡住镜像中间人替换安装包（CODE_REVIEW C1）
       - name: Generate SHA256SUMS
+        if: steps.state.outputs.should_build == 'true'
         shell: pwsh
         run: |
           $ver = '${{ needs.metadata.outputs.version }}'
@@ -279,7 +318,7 @@ jobs:
 
       # 自动/标签发布必须有完整 CHANGELOG 小节，禁止退回占位文案
       - name: Prepare release notes
-        if: needs.metadata.outputs.should_publish == 'true'
+        if: steps.state.outputs.should_publish == 'true'
         shell: pwsh
         run: |
           $ver = '${{ needs.metadata.outputs.version }}'
@@ -292,6 +331,7 @@ jobs:
           Get-Content -Encoding UTF8 release_notes.md
 
       - name: Verify release files
+        if: steps.state.outputs.should_build == 'true'
         shell: pwsh
         run: |
           $ver = '${{ needs.metadata.outputs.version }}'
@@ -300,7 +340,7 @@ jobs:
             "LightCast-Portable-$ver.zip"
             'SHA256SUMS.txt'
           )
-          if ('${{ needs.metadata.outputs.should_publish }}' -eq 'true') {
+          if ('${{ steps.state.outputs.should_publish }}' -eq 'true') {
             $required += 'release_notes.md'
           }
           foreach ($path in $required) {
@@ -311,7 +351,7 @@ jobs:
 
       # 只有所有产物和 Release 正文通过验证后才原子创建 lightweight tag。
       - name: Create release tag
-        if: needs.metadata.outputs.should_create_tag == 'true'
+        if: steps.state.outputs.should_create_tag == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
@@ -327,16 +367,37 @@ jobs:
           }
 
           Write-Host '标签创建发生并发冲突，重新读取远端指向'
-          git fetch origin "refs/tags/${tag}:refs/tags/${tag}"
-          if ($LASTEXITCODE -ne 0) { throw "无法读取并发创建的标签 $tag" }
-          $tagSha = (git rev-list -n 1 $tag).Trim()
+          $tagRefs = @(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")
+          if ($LASTEXITCODE -ne 0 -or $tagRefs.Count -eq 0) {
+            throw "无法读取并发创建的标签 $tag"
+          }
+          $peeled = @($tagRefs | Where-Object { $_.EndsWith('^{}') })
+          $selected = if ($peeled.Count -gt 0) { $peeled[0] } else { $tagRefs[0] }
+          $tagSha = ($selected -split "`t")[0]
           if ($tagSha -ne $env:GITHUB_SHA) {
             throw "$tag 已指向 $tagSha，不能覆盖为 $env:GITHUB_SHA"
           }
           Write-Host "$tag 已由并发 run 创建并指向当前提交，继续发布"
 
-      - name: Publish release
-        if: needs.metadata.outputs.should_publish == 'true'
+      - name: Verify release tag target
+        if: steps.state.outputs.should_publish == 'true'
+        shell: pwsh
+        run: |
+          $tag = '${{ needs.metadata.outputs.tag }}'
+          $tagRefs = @(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")
+          if ($LASTEXITCODE -ne 0) { throw "发布前读取远端标签 $tag 失败" }
+          if ($tagRefs.Count -eq 0) { throw "发布前标签 $tag 已不存在，拒绝由 gh release 自动补建" }
+          $peeled = @($tagRefs | Where-Object { $_.EndsWith('^{}') })
+          $selected = if ($peeled.Count -gt 0) { $peeled[0] } else { $tagRefs[0] }
+          $tagSha = ($selected -split "`t")[0]
+          if ($tagSha -ne $env:GITHUB_SHA) {
+            throw "发布前 $tag 已指向 $tagSha，而当前提交为 $env:GITHUB_SHA"
+          }
+
+      - name: Publish new or missing release
+        if: >-
+          steps.state.outputs.should_publish == 'true' &&
+          steps.state.outputs.should_recover_draft != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
@@ -348,7 +409,41 @@ jobs:
             "LightCast-Portable-$ver.zip" `
             "SHA256SUMS.txt" `
             --title "轻投 LightCast v$ver" `
-            --notes-file 'release_notes.md'
+            --notes-file 'release_notes.md' `
+            --verify-tag
+
+      - name: Recover and publish draft release
+        if: steps.state.outputs.should_recover_draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ver = '${{ needs.metadata.outputs.version }}'
+          $tag = '${{ needs.metadata.outputs.tag }}'
+          $releaseId = '${{ steps.state.outputs.release_id }}'
+          if ($releaseId -notmatch '^[0-9]+$') { throw 'draft Release ID 缺失或非法' }
+          $draftState = gh api `
+            "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" `
+            --jq '[.tag_name, .draft, .prerelease] | @tsv'
+          if ($LASTEXITCODE -ne 0) { throw "覆盖资产前读取 draft Release $releaseId 失败" }
+          $draftFields = $draftState -split "`t"
+          if ($draftFields.Count -ne 3 -or $draftFields[0] -ne $tag -or $draftFields[1] -ne 'true') {
+            throw "$tag 的 Release 已不再是预期 draft，拒绝覆盖资产；请重跑以重新分类"
+          }
+
+          gh release upload "$tag" `
+            "dist\LightCast-Setup-$ver.exe" `
+            "LightCast-Portable-$ver.zip" `
+            "SHA256SUMS.txt" `
+            --clobber
+          if ($LASTEXITCODE -ne 0) { throw "覆盖 $tag draft Release 资产失败" }
+
+          gh release edit "$tag" `
+            --title "轻投 LightCast v$ver" `
+            --notes-file 'release_notes.md' `
+            --draft=false `
+            --prerelease=false `
+            --verify-tag
 
       # 手动触发：不建 Release，产物挂到 run 的 Artifacts 供下载
       - name: Upload artifacts (manual run)
