@@ -138,6 +138,19 @@ def _origin(url: str) -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
+def _route_index(request: web.Request, size: int) -> Optional[int]:
+    """解析代理路由索引；只接受范围内的 ASCII 非负十进制整数。"""
+    raw = request.match_info.get("index", "")
+    if not raw or not raw.isascii() or not raw.isdecimal():
+        return None
+    try:
+        index = int(raw)
+    except ValueError:
+        # Python 3.11 会拒绝超过安全位数上限的整数文本。
+        return None
+    return index if 0 <= index < size else None
+
+
 def _detect_image(data: bytes) -> Optional[str]:
     """按魔数判断数据是否为图片，返回类型名或 None。"""
     for magic, kind in _IMAGE_MAGICS:
@@ -612,13 +625,19 @@ class HlsProxy(_BaseProxy):
     def _register_routes(self, app: web.Application) -> None:  # noqa: ANN001
         app.router.add_get("/playlist.m3u8", self._handle_playlist)
         if self._mode == "image":
-            app.router.add_get("/seg/{index}.avi", self._handle_image_segment)
+            app.router.add_get(
+                r"/seg/{index:[0-9]+}.avi", self._handle_image_segment
+            )
         elif self._mode == "hybrid":
-            app.router.add_get("/seg/{index}.ts", self._handle_hybrid_segment)
+            app.router.add_get(
+                r"/seg/{index:[0-9]+}.ts", self._handle_hybrid_segment
+            )
         else:
-            app.router.add_get("/seg/{index}.mp4", self._handle_segment)
-        app.router.add_get("/key/{index}.key", self._handle_key)
-        app.router.add_get("/map/{index}.mp4", self._handle_map)
+            app.router.add_get(
+                r"/seg/{index:[0-9]+}.mp4", self._handle_segment
+            )
+        app.router.add_get(r"/key/{index:[0-9]+}.key", self._handle_key)
+        app.router.add_get(r"/map/{index:[0-9]+}.mp4", self._handle_map)
 
     # ------------------------------------------------------------------ #
     async def _handle_playlist(self, _request: web.Request) -> web.Response:
@@ -628,14 +647,14 @@ class HlsProxy(_BaseProxy):
         )
 
     async def _handle_segment(self, request: web.Request) -> web.StreamResponse:
-        index = int(request.match_info["index"])
-        if index >= len(self._segments):
+        index = _route_index(request, len(self._segments))
+        if index is None:
             return web.Response(status=404, text="segment not found")
         return await self._forward_url(request, self._segments[index], "分片")
 
     async def _handle_map(self, request: web.Request) -> web.StreamResponse:
-        index = int(request.match_info["index"])
-        if index >= len(self._maps):
+        index = _route_index(request, len(self._maps))
+        if index is None:
             return web.Response(status=404, text="map not found")
         return await self._forward_url(request, self._maps[index], "初始化段")
 
@@ -647,8 +666,8 @@ class HlsProxy(_BaseProxy):
         再以 200 返回。密钥不是 16 字节 = 上游返回了错误内容（常见：
         防盗链把 HTML 错误页伪装成 200），直接 502 让用户看到友好提示。
         """
-        index = int(request.match_info["index"])
-        if index >= len(self._keys):
+        index = _route_index(request, len(self._keys))
+        if index is None:
             return web.Response(status=404, text="key not found")
         url = self._keys[index]
         if url not in self._key_cache:
@@ -695,8 +714,8 @@ class HlsProxy(_BaseProxy):
     # hybrid 模式：PNG 封面 + TS 视频混合分片 → 剥掉封面按 TS 提供
     # ------------------------------------------------------------------ #
     async def _handle_hybrid_segment(self, request: web.Request) -> web.Response:
-        index = int(request.match_info["index"])
-        if index >= len(self._segments):
+        index = _route_index(request, len(self._segments))
+        if index is None:
             return web.Response(status=404, text="segment not found")
         if index not in self._ts_cache:
             ok = await self._ensure_hybrid_segment(index, request)
@@ -834,8 +853,8 @@ class HlsProxy(_BaseProxy):
     # 图像流模式：图片 → JPEG → 单帧 AVI（惰性转换 + 内存缓存）
     # ------------------------------------------------------------------ #
     async def _handle_image_segment(self, request: web.Request) -> web.StreamResponse:
-        index = int(request.match_info["index"])
-        if index >= len(self._segments):
+        index = _route_index(request, len(self._segments))
+        if index is None:
             return web.Response(status=404, text="segment not found")
         if index not in self._jpeg_cache:
             ok = await self._singleflight(
