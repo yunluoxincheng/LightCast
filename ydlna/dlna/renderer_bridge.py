@@ -44,9 +44,10 @@ _TIME_RE = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{1,2}(?:\.\d+)?)$")
 
 def dlna_time_to_seconds(text: str) -> Optional[float]:
     """把 DLNA 时间字符串转秒。失败返回 None。"""
-    if not text or text in ("NOT_IMPLEMENTED", "00:00:00", ""):
+    text = text.strip()
+    if not text or text == "NOT_IMPLEMENTED":
         return None
-    m = _TIME_RE.match(text.strip())
+    m = _TIME_RE.match(text)
     if not m:
         return None
     h, mi, s = m.group(1), int(m.group(2)), float(m.group(3))
