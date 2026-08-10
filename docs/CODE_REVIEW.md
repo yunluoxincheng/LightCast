@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：84 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：85 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、HLS 启动/后台预热、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -200,8 +200,8 @@
 
 ### M3. warm 预热阻塞 DLNA action
 
-- **文件**：`ydlna/player/hls_rewriter.py:885-889`
-- **状态**：`[ ]`
+- **文件**：`ydlna/player/hls_rewriter.py:689-710, 1092-1098`
+- **状态**：`[x]` 已修复（2026-08-10）：混合 HLS 启动阶段只同步等待分片 0，确保 mpv 首片请求命中；等待首片之前先通过 `_schedule_warm(0)` 把分片 1–3 注册到代理的 `BackgroundTasks`，使其利用首片网络等待并发预取，而 setup 不等待这些后台任务完成。代理停止时沿用既有 `cancel_all()`，会先取消并等待所有预热任务，再关闭 session。测试验证分片 0 尚未完成时 1–3 已开始、首片完成后 startup 立即返回，且停止时剩余任务会完整取消。
 - **问题**：setup 期串行预热 5 个分片，最坏 5 分钟才返回 SOAP 响应，控制点可能判超时。
 - **建议**：setup 期只预热第 0 个（让 mpv 首片命中），其余交给 `_schedule_warm` 后台预取。
 

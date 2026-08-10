@@ -100,6 +100,55 @@ def test_hls_proxy_stop_cancels_warm_tasks_before_cleanup(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_hybrid_startup_waits_only_for_first_segment(monkeypatch) -> None:
+    async def scenario() -> None:
+        proxy = hls_rewriter.HlsProxy()
+        proxy._segments = [f"seg-{index}" for index in range(6)]
+        calls: list[int] = []
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        background_started = asyncio.Event()
+        started_in_background: set[int] = set()
+        cancelled: set[int] = set()
+
+        async def warm(index: int) -> None:
+            calls.append(index)
+            if index == 0:
+                first_started.set()
+                await release_first.wait()
+                return
+            started_in_background.add(index)
+            if started_in_background == {1, 2, 3}:
+                background_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.add(index)
+
+        monkeypatch.setattr(proxy, "_warm_hybrid_segment", warm)
+
+        startup_task = asyncio.create_task(proxy._warm_hybrid_startup())
+        await asyncio.wait_for(first_started.wait(), timeout=2.0)
+        await asyncio.wait_for(background_started.wait(), timeout=2.0)
+
+        # 首片仍未完成时，后续 1-3 已利用它的网络等待并发开始。
+        assert not startup_task.done()
+        assert calls[0] == 0
+        assert set(calls[1:]) == {1, 2, 3}
+        assert len(proxy._background_tasks) == 3
+
+        # startup 仍只等待首片；后台 1-3 无需完成即可返回。
+        release_first.set()
+        await asyncio.wait_for(startup_task, timeout=2.0)
+        assert len(proxy._background_tasks) == 3
+
+        await proxy.stop()
+        assert cancelled == {1, 2, 3}
+        assert len(proxy._background_tasks) == 0
+
+    asyncio.run(scenario())
+
+
 def test_application_shutdown_stops_active_proxy_warm_task_and_session(
     monkeypatch,
 ) -> None:
