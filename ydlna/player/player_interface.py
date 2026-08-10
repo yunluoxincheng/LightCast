@@ -58,7 +58,7 @@ class _MediaShortcutFilter(QObject):
 
     方案：在 QApplication 上装事件过滤器，拦截按键（不依赖焦点）：
     - 焦点在文本输入框/下拉框时放行（设置页输入不受影响）
-    - Esc/F 仅在播放器页可见时生效（避免在设置页误触全屏）
+    - 仅在播放器页可见时消费媒体快捷键（避免在设置页误控播放）
     """
 
     def __init__(self, handler: "PlayerInterface") -> None:
@@ -80,6 +80,10 @@ class _MediaShortcutFilter(QObject):
         # 文本输入 / 下拉框：按键原样交给控件（如设备名输入、倍速下拉）
         w = QApplication.focusWidget()
         if isinstance(w, (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox)):
+            return False
+        # 事件过滤器安装在 QApplication 上；离开播放器页后必须整体失效，
+        # 否则设置页上的空格/方向键仍会控制隐藏的播放器。
+        if not self._handler.isVisible():
             return False
         action = self._handler._shortcut_actions.get(event.key())
         if action is None:
