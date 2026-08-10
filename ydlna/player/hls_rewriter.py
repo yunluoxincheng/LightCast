@@ -704,8 +704,10 @@ class HlsProxy(_BaseProxy):
         if not self._segments:
             return
         self._ts_cache_order.append(0)
-        await self._warm_hybrid_segment(0)
+        # 先注册后续预热：首片下载一旦发生网络 await，1-3 就能并发开始，
+        # 避免 setup 返回后 mpv 立即请求下一片时后台任务还没有启动。
         self._schedule_warm(0)
+        await self._warm_hybrid_segment(0)
 
     def _trim_cache(self) -> None:
         """简单 LRU：缓存上限 8 个分片（每个约 1~2MB），防止内存膨胀。"""
@@ -1092,8 +1094,8 @@ async def setup_hls_proxy(
                           referer=origin)
         # 用实际端口替换占位符
         proxy._playlist = proxy._playlist.replace("{BASE}", f"http://127.0.0.1:{proxy.port}")
-        # 混合流：只同步预热首片，让 mpv 打开时立即命中；后续分片由
-        # BackgroundTasks 边播边预取，不能继续阻塞 SetAVTransportURI/SOAP 响应。
+        # 混合流：setup 只等待首片；后续分片在首片网络等待期间已由
+        # BackgroundTasks 并发预取，既不串行阻塞 SOAP，也尽量赶在 mpv 前面。
         if hybrid_mode:
             await proxy._warm_hybrid_startup()
         log.info("m3u8 重写完成: %d 个分片, %d 个密钥, %d 个初始化段 → %s",
