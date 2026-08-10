@@ -75,7 +75,8 @@ import io
 import re
 import struct
 import warnings
-from typing import Optional
+from collections.abc import Callable, Coroutine, Hashable
+from typing import Any, Optional, TypeVar
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
@@ -92,6 +93,8 @@ from ._url_guard import (
 )
 
 log = get_logger("player.hls")
+
+_T = TypeVar("_T")
 
 # #EXT-X-KEY / #EXT-X-MAP 里的 URI="..." 属性
 _ATTR_URI_RE = re.compile(r'URI="([^"]*)"')
@@ -323,6 +326,8 @@ class _BaseProxy:
         # 连接器策略不一致。
         self._allow_intranet: bool = _allow_intranet()
         self._background_tasks = BackgroundTasks()
+        # 同一缓存资源只允许一个生产任务；请求方共享结果，代理负责其生命周期。
+        self._inflight: dict[Hashable, asyncio.Task[Any]] = {}
 
     @property
     def port(self) -> int:
@@ -360,6 +365,7 @@ class _BaseProxy:
     async def stop(self) -> None:
         # 预热任务会使用当前 session；必须先取消等待，再关闭 session。
         await self._background_tasks.cancel_all()
+        self._inflight.clear()
         if self._site is not None:
             try:
                 await self._site.stop()
@@ -380,6 +386,39 @@ class _BaseProxy:
             self._session = None
         self._port = 0
         log.info("本地代理已停止")
+
+    def _singleflight_task(
+        self,
+        key: Hashable,
+        producer: Callable[[], Coroutine[Any, Any, _T]],
+        *,
+        name: str,
+    ) -> asyncio.Task[_T]:
+        """取得或创建某个缓存资源唯一的生产任务。"""
+        existing = self._inflight.get(key)
+        if existing is not None:
+            return existing  # type: ignore[return-value]
+
+        task = self._background_tasks.create(producer(), name=name)
+        self._inflight[key] = task
+
+        def remove_if_current(done: asyncio.Task[Any]) -> None:
+            if self._inflight.get(key) is done:
+                self._inflight.pop(key, None)
+
+        task.add_done_callback(remove_if_current)
+        return task
+
+    async def _singleflight(
+        self,
+        key: Hashable,
+        producer: Callable[[], Coroutine[Any, Any, _T]],
+        *,
+        name: str,
+    ) -> _T:
+        """共享同一生产任务；单个等待方取消不会连带取消共享下载。"""
+        task = self._singleflight_task(key, producer, name=name)
+        return await asyncio.shield(task)
 
     def _default_headers(self) -> dict[str, str]:
         headers = {"User-Agent": _BROWSER_UA}
@@ -539,6 +578,8 @@ class HlsProxy(_BaseProxy):
         # hybrid 模式：PNG 封面 + TS 视频混合分片 → 剥前缀缓存
         self._ts_cache: dict[int, bytes] = {}
         self._ts_cache_order: list[int] = []
+        # 标记由低重试后台预热创建的 flight，供前台失败后升级接管。
+        self._hybrid_warm_flights: dict[int, asyncio.Task[bool]] = {}
 
     async def start(self, segments: list[str], playlist: str,
                     keys: Optional[list[str]] = None,
@@ -564,6 +605,7 @@ class HlsProxy(_BaseProxy):
         self._jpeg_cache_order = []
         self._ts_cache = {}
         self._ts_cache_order = []
+        self._hybrid_warm_flights = {}
         self._referer = referer
         await super().start("")
 
@@ -613,28 +655,41 @@ class HlsProxy(_BaseProxy):
             headers = {k: v for k, v in request.headers.items()
                        if k.lower() not in ("host", "connection", "accept-encoding",
                                             "range", "if-range")}
-            resp = await self._get(url, headers=headers, timeout=_TIMEOUT)
-            if resp is None:
-                return web.Response(status=502, text="proxy error")
-            if resp.status not in (200, 206):
-                log.warning("密钥 %s 上游返回 HTTP %s", url, resp.status)
-                status = resp.status
-                resp.close()
-                return web.Response(status=status, text="upstream error")
-            # 多读 1 字节识别"上游多给内容"：read(17) 若上游返回 ≥17 字节，
-            # 说明不是真正的 16 字节 AES 密钥（常见：防盗链把 HTML 伪装成 200）
-            data = await _read_aes128_key(resp)
-            resp.close()
-            if data is None:
-                log.warning("密钥长度异常（AES-128 应恰好为 16 字节），"
-                            "可能被防盗链拦截: %s", url)
-                return web.Response(status=502, text="key length invalid")
-            self._key_cache[url] = data
-            log.debug("密钥已缓存: %s (16 字节)", url)
+            status, message = await self._singleflight(
+                ("key", url),
+                lambda: self._load_key(url, headers),
+                name=f"load-hls-key-{index}",
+            )
+            if status != 200:
+                return web.Response(status=status, text=message)
         return web.Response(
             body=self._key_cache[url],
             content_type="application/octet-stream",
         )
+
+    async def _load_key(
+        self, url: str, headers: dict[str, str]
+    ) -> tuple[int, str]:
+        """抓取并缓存密钥；返回要提供给所有并发等待方的结果。"""
+        resp = await self._get(url, headers=headers, timeout=_TIMEOUT)
+        if resp is None:
+            return 502, "proxy error"
+        try:
+            if resp.status not in (200, 206):
+                log.warning("密钥 %s 上游返回 HTTP %s", url, resp.status)
+                return resp.status, "upstream error"
+            # 多读 1 字节识别"上游多给内容"：read(17) 若上游返回 ≥17 字节，
+            # 说明不是真正的 16 字节 AES 密钥（常见：防盗链把 HTML 伪装成 200）
+            data = await _read_aes128_key(resp)
+        finally:
+            resp.close()
+        if data is None:
+            log.warning("密钥长度异常（AES-128 应恰好为 16 字节），"
+                        "可能被防盗链拦截: %s", url)
+            return 502, "key length invalid"
+        self._key_cache[url] = data
+        log.debug("密钥已缓存: %s (16 字节)", url)
+        return 200, ""
 
     # ------------------------------------------------------------------ #
     # hybrid 模式：PNG 封面 + TS 视频混合分片 → 剥掉封面按 TS 提供
@@ -644,20 +699,67 @@ class HlsProxy(_BaseProxy):
         if index >= len(self._segments):
             return web.Response(status=404, text="segment not found")
         if index not in self._ts_cache:
-            ok = await self._buffer_hybrid(index, request)
+            ok = await self._ensure_hybrid_segment(index, request)
             if not ok:
                 return web.Response(status=502, text="hybrid fetch failed")
         self._schedule_warm(index)
         return web.Response(body=self._ts_cache[index],
                             content_type="video/mp2t")
 
-    async def _buffer_hybrid(self, index: int, request: web.Request) -> bool:
+    async def _ensure_hybrid_segment(
+        self,
+        index: int,
+        request: Optional[web.Request] = None,
+        *,
+        retries: int = 1,
+    ) -> bool:
+        """共享分片抓取；低重试预热失败后允许前台用完整策略接管。"""
+        if index in self._ts_cache:
+            return True
+
+        key = ("hybrid", index)
+        existing = self._inflight.get(key)
+        joined_warm = (
+            request is not None
+            and retries > 0
+            and self._hybrid_warm_flights.get(index) is existing
+        )
+        ok = await self._singleflight(
+            key,
+            lambda: self._buffer_hybrid(index, request, retries=retries),
+            name=f"load-hls-segment-{index}",
+        )
+        if ok or not joined_warm:
+            return ok
+
+        # 预热用 retries=0 且没有播放器请求头。前台先等待它，失败后再按
+        # 自身 headers/retries 串行建立（或加入）新的 flight，保留恢复机会。
+        if self._inflight.get(key) is existing:
+            self._inflight.pop(key, None)
+        return await self._singleflight(
+            key,
+            lambda: self._buffer_hybrid(index, request, retries=retries),
+            name=f"load-hls-segment-{index}-foreground",
+        )
+
+    async def _buffer_hybrid(
+        self,
+        index: int,
+        request: Optional[web.Request] = None,
+        *,
+        retries: int = 1,
+    ) -> bool:
         """下载混合分片 → 剥掉封面 → 缓存。"""
         url = self._segments[index]
-        headers = {k: v for k, v in request.headers.items()
-                   if k.lower() not in ("host", "connection", "accept-encoding",
-                                        "range", "if-range")}
-        resp = await self._get(url, headers=headers, timeout=_TIMEOUT_BIG)
+        headers = (
+            {k: v for k, v in request.headers.items()
+             if k.lower() not in ("host", "connection", "accept-encoding",
+                                  "range", "if-range")}
+            if request is not None else None
+        )
+        resp = await self._get(
+            url, headers=headers, retries=retries, timeout=_TIMEOUT_BIG
+        )
         if resp is None:
             log.warning("混合分片 %d 上游不可达: %s", index, url)
             return False
@@ -691,19 +793,28 @@ class HlsProxy(_BaseProxy):
         for nxt in (index + 1, index + 2, index + 3):
             if nxt >= len(self._segments) or nxt in self._ts_cache:
                 continue
-            if nxt in self._ts_cache_order:  # 已在预取队列
+            key = ("hybrid", nxt)
+            if key in self._inflight:
                 continue
-            self._ts_cache_order.append(nxt)
-            self._background_tasks.create(
-                self._warm_hybrid_segment(nxt),
+            task = self._singleflight_task(
+                key,
+                lambda nxt=nxt: self._buffer_hybrid(nxt, retries=0),
                 name=f"warm-hls-segment-{nxt}",
             )
+            self._hybrid_warm_flights[nxt] = task
+
+            def clear_warm(
+                done: asyncio.Task[Any], *, segment: int = nxt
+            ) -> None:
+                if self._hybrid_warm_flights.get(segment) is done:
+                    self._hybrid_warm_flights.pop(segment, None)
+
+            task.add_done_callback(clear_warm)
 
     async def _warm_hybrid_startup(self) -> None:
         """启动期只等待首片，后续分片交给受管后台任务预取。"""
         if not self._segments:
             return
-        self._ts_cache_order.append(0)
         # 先注册后续预热：首片下载一旦发生网络 await，1-3 就能并发开始，
         # 避免 setup 返回后 mpv 立即请求下一片时后台任务还没有启动。
         self._schedule_warm(0)
@@ -716,26 +827,8 @@ class HlsProxy(_BaseProxy):
             self._ts_cache.pop(oldest, None)
 
     async def _warm_hybrid_segment(self, index: int) -> None:
-        """预取一个混合分片到缓存（防盗链头由 _get 附加）。"""
-        url = self._segments[index]
-        resp = await self._get(url, retries=0, timeout=_TIMEOUT_BIG)
-        if resp is None:
-            return
-        if resp.status != 200:
-            resp.close()
-            return
-        try:
-            data = await _read_capped(resp, f"混合分片 {index}（预热）")
-        finally:
-            resp.close()
-        if data is None:
-            return
-        off = _find_ts_offset(data)
-        if off is not None:
-            self._ts_cache[index] = data[off:]
-            log.debug("混合分片 %d 已预热（TS %d 字节）", index,
-                      len(self._ts_cache[index]))
-        self._trim_cache()
+        """预取一个混合分片；若播放器也在请求则复用同一抓取任务。"""
+        await self._ensure_hybrid_segment(index, retries=0)
 
     # ------------------------------------------------------------------ #
     # 图像流模式：图片 → JPEG → 单帧 AVI（惰性转换 + 内存缓存）
@@ -745,7 +838,11 @@ class HlsProxy(_BaseProxy):
         if index >= len(self._segments):
             return web.Response(status=404, text="segment not found")
         if index not in self._jpeg_cache:
-            ok = await self._convert_segment(index, request)
+            ok = await self._singleflight(
+                ("image", index),
+                lambda: self._convert_segment(index, request),
+                name=f"convert-hls-image-{index}",
+            )
             if ok is None:
                 # 像素炸弹不能回退原始转发，否则只是把危险输入改交给 mpv 解码。
                 return web.Response(status=413, text="image pixel limit exceeded")
@@ -835,7 +932,11 @@ class DirectProxy(_BaseProxy):
         if self._mode == "video":
             return await self._forward_url(request, self._url, "媒体")
         if self._data is None:
-            ok = await self._buffer_once(request)
+            ok = await self._singleflight(
+                ("direct", self._url),
+                lambda: self._buffer_once(request),
+                name="buffer-direct-media",
+            )
             if not ok:
                 return web.Response(status=502, text="buffer failed")
             if self._mode == "video":

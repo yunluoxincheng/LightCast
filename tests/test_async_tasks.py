@@ -78,14 +78,15 @@ def test_hls_proxy_stop_cancels_warm_tasks_before_cleanup(monkeypatch) -> None:
         started: set[int] = set()
         cancelled: set[int] = set()
 
-        async def warm(index: int) -> None:
+        async def buffer(index: int, _request=None, **_kwargs) -> bool:  # noqa: ANN001
             started.add(index)
             try:
                 await asyncio.Event().wait()
             finally:
                 cancelled.add(index)
+            return True
 
-        monkeypatch.setattr(proxy, "_warm_hybrid_segment", warm)
+        monkeypatch.setattr(proxy, "_buffer_hybrid", buffer)
         proxy._schedule_warm(0)
         await asyncio.sleep(0)
 
@@ -96,6 +97,7 @@ def test_hls_proxy_stop_cancels_warm_tasks_before_cleanup(monkeypatch) -> None:
 
         assert cancelled == {1, 2, 3}
         assert len(proxy._background_tasks) == 0
+        assert proxy._inflight == {}
 
     asyncio.run(scenario())
 
@@ -111,12 +113,12 @@ def test_hybrid_startup_waits_only_for_first_segment(monkeypatch) -> None:
         started_in_background: set[int] = set()
         cancelled: set[int] = set()
 
-        async def warm(index: int) -> None:
+        async def buffer(index: int, _request=None, **_kwargs) -> bool:  # noqa: ANN001
             calls.append(index)
             if index == 0:
                 first_started.set()
                 await release_first.wait()
-                return
+                return True
             started_in_background.add(index)
             if started_in_background == {1, 2, 3}:
                 background_started.set()
@@ -124,8 +126,9 @@ def test_hybrid_startup_waits_only_for_first_segment(monkeypatch) -> None:
                 await asyncio.Event().wait()
             finally:
                 cancelled.add(index)
+            return True
 
-        monkeypatch.setattr(proxy, "_warm_hybrid_segment", warm)
+        monkeypatch.setattr(proxy, "_buffer_hybrid", buffer)
 
         startup_task = asyncio.create_task(proxy._warm_hybrid_startup())
         await asyncio.wait_for(first_started.wait(), timeout=2.0)
@@ -133,9 +136,8 @@ def test_hybrid_startup_waits_only_for_first_segment(monkeypatch) -> None:
 
         # 首片仍未完成时，后续 1-3 已利用它的网络等待并发开始。
         assert not startup_task.done()
-        assert calls[0] == 0
-        assert set(calls[1:]) == {1, 2, 3}
-        assert len(proxy._background_tasks) == 3
+        assert set(calls) == {0, 1, 2, 3}
+        assert len(proxy._background_tasks) == 4
 
         # startup 仍只等待首片；后台 1-3 无需完成即可返回。
         release_first.set()
@@ -145,6 +147,7 @@ def test_hybrid_startup_waits_only_for_first_segment(monkeypatch) -> None:
         await proxy.stop()
         assert cancelled == {1, 2, 3}
         assert len(proxy._background_tasks) == 0
+        assert proxy._inflight == {}
 
     asyncio.run(scenario())
 
@@ -204,6 +207,7 @@ def test_application_shutdown_stops_active_proxy_warm_task_and_session(
         assert warm_task.cancelled()
         assert response.closed is True
         assert session.closed is True
+        assert proxy._inflight == {}
         assert bridge._hls_proxy is None
 
     asyncio.run(scenario())
