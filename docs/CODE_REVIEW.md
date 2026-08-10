@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：85 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、HLS 启动/后台预热、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-11）：90 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、HLS 启动/后台预热及缓存 single-flight、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -207,8 +207,8 @@
 
 ### M4. 缓存竞态（thundering herd）
 
-- **文件**：`ydlna/player/hls_rewriter.py:484, 514, 598, 667`
-- **状态**：`[ ]`
+- **文件**：`ydlna/player/hls_rewriter.py:326-420, 639-831, 899-916`
+- **状态**：`[x]` 已修复（2026-08-11）：代理基类新增按资源 key 管理的 single-flight 注册表，AES key、混合 HLS 分片、图片转码和 DirectProxy 整段缓冲在缓存 miss 时只创建一个受管生产任务，其余并发请求共享同一结果。混合分片的后台预热与播放器即时请求也使用同一个 flight，消除 PR #7 后仍存在的重复上游抓取窗口。单个请求取消只结束自身等待，不会误杀其他使用者共享的任务；代理停止仍通过 `BackgroundTasks.cancel_all()` 统一取消并等待生产任务。成功、失败或取消都会清除 flight，失败不会污染缓存且后续请求可重试。新增测试覆盖密钥取消隔离、失败共享/重试、预热与即时请求合流、图片转换和直链缓冲去重。
 - **问题**：判空 → 抓取 → 写缓存无锁，同分片 / key 被并发重复抓取。
 - **建议**：用 `asyncio.Lock` 或 single-flight 模式（每个 key 一个 `Future`，后续请求 await 同一 Future）。
 
