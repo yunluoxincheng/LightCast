@@ -29,6 +29,15 @@ if TYPE_CHECKING:
 
 log = get_logger("dlna.bridge")
 
+_TRANSPORT_STATES = frozenset({
+    "STOPPED",
+    "PLAYING",
+    "TRANSITIONING",
+    "PAUSED_PLAYBACK",
+    "NO_MEDIA_PRESENT",
+})
+_TRANSPORT_STATUSES = frozenset({"OK", "ERROR_OCCURRED"})
+
 # DLNA 时间格式 H:MM:SS 或 H:MM:SS.frac → 秒
 _TIME_RE = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{1,2}(?:\.\d+)?)$")
 
@@ -127,8 +136,15 @@ class RendererBridge:
         self._cm: Optional["ConnectionManagerService"] = None
         self._poll_task: Optional[asyncio.Task] = None
         self._poll_tasks = BackgroundTasks()
+        # SetAVTransportURI 涉及旧代理停止、新代理创建、Player 切换和协议状态提交，
+        # 必须作为一个串行事务执行，避免较早请求晚完成后覆盖较新的投屏。
+        self._set_uri_lock = asyncio.Lock()
         self._last_position: Optional[float] = None
         self._last_duration: Optional[float] = None
+        # TransportStatus 与 TransportState 是两条独立的 UPnP 状态轴：
+        # 错误只能写 ERROR_OCCURRED 到前者，后者必须保持合法的播放状态。
+        # Bridge 在 DLNA service 停服期间继续存活，因此同时持有该状态供重绑恢复。
+        self._transport_status = "OK"
         # 保存控制点提供的原始 URI/元数据。Player 播放的是 127.0.0.1 代理地址，
         # DLNA 服务重启后不能把该内部 URL 暴露给重新连接的控制点。
         self._current_uri = ""
@@ -213,7 +229,7 @@ class RendererBridge:
 
         for name, value in (
             ("TransportState", transport_state),
-            ("TransportStatus", "OK"),
+            ("TransportStatus", self._transport_status),
             ("AVTransportURI", uri),
             ("AVTransportURIMetaData", meta),
             ("CurrentTrackURI", uri),
@@ -240,6 +256,11 @@ class RendererBridge:
     # DLNA action → Player（由各 service 的 action handler 调用）
     # ------------------------------------------------------------------ #
     async def on_set_uri(self, url: str, meta: str) -> None:
+        """串行执行媒体切换；后到请求最终覆盖先到请求。"""
+        async with self._set_uri_lock:
+            await self._on_set_uri_locked(url, meta)
+
+    async def _on_set_uri_locked(self, url: str, meta: str) -> None:
         """设置媒体 URI。
 
         所有 http(s) 媒体都先过本地代理：
@@ -251,17 +272,20 @@ class RendererBridge:
         SSRF 防护（三道关）：
         1. 非 http(s) scheme（file:// / edl:// / data: 等）→ 直接拒绝，不传给 mpv。
         2. 入口 validate_upstream_url：URL 字面量指向本机/云元数据/（收紧模式下）私网
-           → 抛 UrlBlockedError → 置 ERROR_OCCURRED，绝不 fallback 到 mpv。
+           → 抛 UrlBlockedError → 置 TransportStatus=ERROR_OCCURRED，绝不 fallback 到 mpv。
         3. 代理层 setup_*_proxy 内部 + SSRFSafeConnector 连接时再校验（堵 302/rebinding）。
         普通失败（403/格式/网络）同样不绕过代理层。
         """
         title = parse_title_from_didl(meta) or url
         log.info("桥接: 设置媒体 title=%r url=%s", title, url)
+        # URI/meta 先作为本次事务的候选值写给 service；只有代理初始化且
+        # Player.play() 成功返回后才提交到 Bridge。失败则恢复上一份已提交身份。
+        self._begin_transport_attempt(url, meta)
 
         # 第一道：scheme 白名单
         if not url.lower().startswith(("http://", "https://")):
             log.warning("拒绝非 http(s) 投屏 URL（可能尝试读取本地文件）: %s", url)
-            self._set_transport_state("ERROR_OCCURRED")
+            self._fail_transport_attempt()
             return
 
         # 第二道：入口安全校验。被拦（UrlBlockedError）→ 直接 ERROR，绝不 fallback。
@@ -271,11 +295,8 @@ class RendererBridge:
             validate_upstream_url(url, allow_intranet=allow_intranet)
         except UrlBlockedError as e:
             log.warning("投屏 URL 被安全策略拦截: %s（%s）", url, e.reason)
-            self._set_transport_state("ERROR_OCCURRED")
+            self._fail_transport_attempt()
             return
-
-        self._current_uri = url
-        self._current_meta = meta or ""
 
         # 先通知 UI「投屏到达」：立即切到播放器页并显示缓冲动画，
         # 代理/解码在后台进行（用户体感秒进）
@@ -286,23 +307,60 @@ class RendererBridge:
             except Exception as e:  # noqa: BLE001
                 log.debug("on_cast_started 回调异常: %s", e)
 
+        candidate_info = None
         try:
-            proxied = await self._setup_proxy(
+            candidate_info = await self._setup_proxy_candidate(
                 url, allow_intranet=allow_intranet
             )
-            if proxied is not None:
-                log.info("播放代理后的 URL: %s", proxied)
+            if candidate_info is not None:
+                proxy_attr, candidate = candidate_info
+                proxied = candidate.playlist_url
+                log.info("播放候选代理 URL: %s", proxied)
+                # 只有 Player 接受 candidate 后才提交媒体身份和代理引用；
+                # 此前旧代理始终保持运行，可用于完整回滚。
                 self._player.play(proxied, title)
+                self._current_uri = url
+                self._current_meta = meta or ""
+                await self._commit_proxy_candidate(proxy_attr, candidate)
                 return
             log.warning("代理初始化失败；为避免绕过 SSRF 防护，不直接播放原始 URL")
-            self._set_transport_state("ERROR_OCCURRED")
+            self._fail_transport_attempt()
         except UrlBlockedError as e:
             # 代理层 SSRF 拒绝（分片/密钥/重定向目标命中黑名单）：同样绝不 fallback。
             log.warning("代理阶段 URL 被安全策略拦截: %s（%s）", url, e.reason)
-            self._set_transport_state("ERROR_OCCURRED")
+            if candidate_info is not None:
+                await self._discard_proxy_candidate(candidate_info[1])
+            self._fail_transport_attempt()
         except Exception as e:  # noqa: BLE001  代理/播放失败：回滚状态，避免 UI 不一致
             log.warning("设置媒体失败: %s", e)
-            self._set_transport_state("ERROR_OCCURRED")
+            if candidate_info is not None:
+                await self._discard_proxy_candidate(candidate_info[1])
+            self._fail_transport_attempt()
+
+    def _write_transport_identity(self, uri: str, meta: str) -> None:
+        if self._avt is None:
+            return
+        for name, value in (
+            ("AVTransportURI", uri),
+            ("AVTransportURIMetaData", meta),
+            ("CurrentTrackURI", uri),
+            ("CurrentTrackMetaData", meta),
+            ("CurrentTrack", 1 if uri else 0),
+            ("NumberOfTracks", 1 if uri else 0),
+        ):
+            self._write_state_variable(self._avt, name, value)
+
+    def _begin_transport_attempt(self, uri: str, meta: str) -> None:
+        """发布候选请求状态，但暂不覆盖 Bridge 已提交的媒体身份。"""
+        self._set_transport_status("OK")
+        self._write_transport_identity(uri, meta or "")
+        self._set_transport_state("STOPPED")
+
+    def _fail_transport_attempt(self) -> None:
+        """失败时恢复上一份已提交媒体身份，并独立报告错误状态。"""
+        self._write_transport_identity(self._current_uri, self._current_meta)
+        self._set_transport_state(self._player_transport_state())
+        self._set_transport_status("ERROR_OCCURRED")
 
     def _allow_intranet(self) -> bool:
         """读取「允许内网投屏源」配置（与 hls_rewriter 一致，默认 True）。"""
@@ -313,28 +371,52 @@ class RendererBridge:
         except Exception:  # noqa: BLE001
             return True
 
-    async def _setup_proxy(
+    async def _setup_proxy_candidate(
         self, url: str, *, allow_intranet: bool
-    ) -> Optional[str]:
-        """建立本地媒体代理，返回可播放 URL（失败返回 None）。
+    ) -> Optional[tuple[str, object]]:
+        """建立候选代理但不触碰当前代理引用（失败返回 None）。
 
         m3u8 走 HLS 重写代理，其它 http(s) 直链走 DirectProxy；
-        换媒体时先停掉旧代理（多次投屏复用同一套状态）。
+        候选代理只有在 Player.play() 成功返回后才会被提交。
         """
         from ..player.hls_rewriter import setup_direct_proxy, setup_hls_proxy
-        for attr in ("_hls_proxy", "_direct_proxy"):
-            old = getattr(self, attr, None)
-            if old is not None and old.running:
-                await old.stop()
         if ".m3u8" in url.lower():
             proxy = await setup_hls_proxy(url, allow_intranet=allow_intranet)
-            self._hls_proxy = proxy
+            proxy_attr = "_hls_proxy"
         else:
             proxy = await setup_direct_proxy(url, allow_intranet=allow_intranet)
-            self._direct_proxy = proxy
+            proxy_attr = "_direct_proxy"
         if proxy is None:
             return None
-        return proxy.playlist_url
+        return proxy_attr, proxy
+
+    async def _discard_proxy_candidate(self, candidate) -> None:  # noqa: ANN001
+        """Player 未接受候选代理时只清理 candidate，绝不触碰旧代理。"""
+        try:
+            await candidate.stop()
+        except Exception as e:  # noqa: BLE001
+            log.warning("清理未提交候选代理失败: %s", e)
+
+    async def _commit_proxy_candidate(self, proxy_attr: str, candidate) -> None:  # noqa: ANN001
+        """提交 candidate 后退休全部旧代理；调用前 Player 已接受新 URL。"""
+        old_proxies = tuple(
+            (attr, getattr(self, attr, None))
+            for attr in ("_hls_proxy", "_direct_proxy")
+        )
+        setattr(self, proxy_attr, candidate)
+
+        for attr, old in old_proxies:
+            if old is None or old is candidate:
+                continue
+            try:
+                if old.running:
+                    await old.stop()
+            except Exception as e:  # noqa: BLE001
+                log.warning("停止已替换媒体代理失败（%s）: %s", attr, e)
+            finally:
+                # 同类型 attr 已指向 candidate 时不能被旧代理清理覆盖。
+                if getattr(self, attr, None) is old:
+                    setattr(self, attr, None)
 
     def on_play(self) -> None:
         log.info("桥接: 播放")
@@ -396,12 +478,26 @@ class RendererBridge:
             )
 
     def _set_transport_state(self, dlna_state: str) -> None:
+        if dlna_state not in _TRANSPORT_STATES:
+            raise ValueError(f"非法 TransportState: {dlna_state}")
         if self._avt is None:
             return
         try:
             self._avt.state_variable("TransportState").value = dlna_state
         except Exception as e:  # noqa: BLE001
             log.debug("设置 TransportState 失败: %s", e)
+
+    def _set_transport_status(self, status: str) -> None:
+        """更新协议状态；错误状态不能写入 TransportState。"""
+        if status not in _TRANSPORT_STATUSES:
+            raise ValueError(f"非法 TransportStatus: {status}")
+        self._transport_status = status
+        if self._avt is None:
+            return
+        try:
+            self._avt.state_variable("TransportStatus").value = status
+        except Exception as e:  # noqa: BLE001
+            log.debug("设置 TransportStatus 失败: %s", e)
 
     # ------------------------------------------------------------------ #
     # 进度回传（1Hz 定时器）
