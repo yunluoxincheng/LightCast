@@ -89,3 +89,243 @@ def test_direct_proxy_does_not_forward_pixel_bomb_to_mpv(monkeypatch) -> None:
 
     assert asyncio.run(proxy._buffer_once(Request())) is False  # type: ignore[arg-type]
     assert proxy._mode == "image"
+
+
+def test_forward_uses_bounded_stream_timeout(monkeypatch) -> None:
+    class Content:
+        async def read(self, _size: int) -> bytes:
+            return b"video"
+
+        async def iter_chunked(self, _size: int):  # noqa: ANN202
+            yield b"-data"
+
+    class Response:
+        status = 200
+        headers: dict[str, str] = {}
+        content = Content()
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Request:
+        headers: dict[str, str] = {}
+
+    class Stream:
+        def __init__(self, *, status: int) -> None:
+            self.status = status
+            self.headers: dict[str, str] = {}
+            self.content_type = ""
+            self.written: list[bytes] = []
+
+        async def prepare(self, _request) -> None:  # noqa: ANN001
+            return None
+
+        async def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        async def write_eof(self) -> None:
+            return None
+
+    response = Response()
+    seen_timeout = None
+
+    async def safe_get(_session, _url, **kwargs):  # noqa: ANN001, ANN003
+        nonlocal seen_timeout
+        seen_timeout = kwargs.get("timeout")
+        return response
+
+    proxy = hls_rewriter.DirectProxy()
+    proxy._session = object()  # type: ignore[assignment]
+    monkeypatch.setattr(hls_rewriter, "safe_get", safe_get)
+    monkeypatch.setattr(hls_rewriter.web, "StreamResponse", Stream)
+
+    result = asyncio.run(
+        proxy._forward_url(  # type: ignore[arg-type]
+            Request(), "https://public.example/video", "媒体"
+        )
+    )
+
+    assert seen_timeout is hls_rewriter._TIMEOUT_FORWARD
+    assert seen_timeout.total is None
+    assert seen_timeout.connect == 10
+    assert seen_timeout.sock_read == 30
+    assert result.written == [b"video", b"-data"]
+    assert response.closed
+
+
+def test_forward_timeout_before_local_response_returns_504(monkeypatch) -> None:
+    class Content:
+        async def read(self, _size: int) -> bytes:
+            raise asyncio.TimeoutError
+
+    class Response:
+        status = 200
+        headers: dict[str, str] = {}
+        content = Content()
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Request:
+        headers: dict[str, str] = {}
+
+    response = Response()
+
+    async def safe_get(_session, _url, **_kwargs):  # noqa: ANN001, ANN003
+        return response
+
+    proxy = hls_rewriter.DirectProxy()
+    proxy._session = object()  # type: ignore[assignment]
+    monkeypatch.setattr(hls_rewriter, "safe_get", safe_get)
+
+    result = asyncio.run(
+        proxy._forward_url(  # type: ignore[arg-type]
+            Request(), "https://slow.example/video", "媒体"
+        )
+    )
+
+    assert result.status == 504
+    assert response.closed
+
+
+def test_cancelled_forward_closes_upstream_response(monkeypatch) -> None:
+    class Content:
+        async def read(self, _size: int) -> bytes:
+            raise asyncio.CancelledError
+
+    class Response:
+        status = 200
+        headers: dict[str, str] = {}
+        content = Content()
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Request:
+        headers: dict[str, str] = {}
+
+    response = Response()
+
+    async def safe_get(_session, _url, **_kwargs):  # noqa: ANN001, ANN003
+        return response
+
+    proxy = hls_rewriter.DirectProxy()
+    proxy._session = object()  # type: ignore[assignment]
+    monkeypatch.setattr(hls_rewriter, "safe_get", safe_get)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            proxy._forward_url(  # type: ignore[arg-type]
+                Request(), "https://slow.example/video", "媒体"
+            )
+        )
+
+    assert response.closed
+
+
+def test_cancelled_stream_prepare_closes_upstream_response(monkeypatch) -> None:
+    class Content:
+        async def read(self, _size: int) -> bytes:
+            return b"video"
+
+    class Response:
+        status = 200
+        headers: dict[str, str] = {}
+        content = Content()
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Request:
+        headers: dict[str, str] = {}
+
+    class Stream:
+        def __init__(self, *, status: int) -> None:
+            self.status = status
+            self.headers: dict[str, str] = {}
+            self.content_type = ""
+
+        async def prepare(self, _request) -> None:  # noqa: ANN001
+            raise asyncio.CancelledError
+
+    response = Response()
+
+    async def safe_get(_session, _url, **_kwargs):  # noqa: ANN001, ANN003
+        return response
+
+    proxy = hls_rewriter.DirectProxy()
+    proxy._session = object()  # type: ignore[assignment]
+    monkeypatch.setattr(hls_rewriter, "safe_get", safe_get)
+    monkeypatch.setattr(hls_rewriter.web, "StreamResponse", Stream)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            proxy._forward_url(  # type: ignore[arg-type]
+                Request(), "https://public.example/video", "媒体"
+            )
+        )
+
+    assert response.closed
+
+
+def test_streaming_timeout_closes_upstream_response(monkeypatch) -> None:
+    class Content:
+        async def read(self, _size: int) -> bytes:
+            return b"video"
+
+        async def iter_chunked(self, _size: int):  # noqa: ANN202
+            raise asyncio.TimeoutError
+            yield b"unreachable"
+
+    class Response:
+        status = 200
+        headers: dict[str, str] = {}
+        content = Content()
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Request:
+        headers: dict[str, str] = {}
+
+    class Stream:
+        def __init__(self, *, status: int) -> None:
+            self.status = status
+            self.headers: dict[str, str] = {}
+            self.content_type = ""
+            self.written: list[bytes] = []
+            self.eof_written = False
+
+        async def prepare(self, _request) -> None:  # noqa: ANN001
+            return None
+
+        async def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        async def write_eof(self) -> None:
+            self.eof_written = True
+
+    response = Response()
+
+    async def safe_get(_session, _url, **_kwargs):  # noqa: ANN001, ANN003
+        return response
+
+    proxy = hls_rewriter.DirectProxy()
+    proxy._session = object()  # type: ignore[assignment]
+    monkeypatch.setattr(hls_rewriter, "safe_get", safe_get)
+    monkeypatch.setattr(hls_rewriter.web, "StreamResponse", Stream)
+
+    result = asyncio.run(
+        proxy._forward_url(  # type: ignore[arg-type]
+            Request(), "https://slow.example/video", "媒体"
+        )
+    )
+
+    assert result.written == [b"video"]
+    assert result.eof_written
+    assert response.closed

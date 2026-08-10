@@ -184,3 +184,16 @@ def test_connector_does_not_replace_resolver_method_per_request() -> None:
             await connector.close()
 
     asyncio.run(scenario())
+
+
+def test_safe_session_has_bounded_connection_pool() -> None:
+    async def scenario() -> None:
+        session = make_session(allow_intranet=True)
+        try:
+            assert session.connector is not None
+            assert session.connector.limit == 64
+            assert session.connector.limit_per_host == 16
+        finally:
+            await session.close()
+
+    asyncio.run(scenario())

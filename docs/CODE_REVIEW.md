@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：78 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：84 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -92,8 +92,8 @@
 
 ### H1. 代理 DoS 面：无上限读取 / 解压炸弹 / 无限缓存 / 慢速攻击
 
-- **文件**：`ydlna/player/hls_rewriter.py:771, 494, 825, 923, 631-637, 704-709, 410-411, 345, 261`
-- **状态**：`[x]` 部分修复（2026-08-09）：m3u8/密钥/探测读取加硬上限；AES key 多读 1 字节并要求恰好 16 字节；PIL `MAX_IMAGE_PIXELS` 收紧为 4096² 且把 `DecompressionBombWarning` 提升为异常；`_jpeg_cache` 加 LRU；连接器限制为总 64 / 单 host 16。**未修**：`_forward_url` 流式转发的独立 `sock_read` 超时（见 M6，留后续）。
+- **文件**：`ydlna/player/hls_rewriter.py:116-128, 278-305, 422-509, 574-609, 677-780`；`ydlna/player/_url_guard.py:210-219`
+- **状态**：`[x]` 已修复（2026-08-10）：m3u8/密钥/探测读取加硬上限；AES key 多读 1 字节并要求恰好 16 字节；PIL `MAX_IMAGE_PIXELS` 收紧为 4096² 且把 `DecompressionBombWarning` 提升为异常；`_jpeg_cache` 加 LRU；连接器限制为总 64 / 单 host 16。`_forward_url` 使用独立的 `ClientTimeout(total=None, connect=10, sock_read=30)`：不限制正常长视频的总播放时间，但限制连接等待和连续无数据时间；首包超时返回 504，取消与传输异常都会关闭上游 response。H1 的剩余慢速上游缺口已随 M6 关闭。
 - **问题**：
   - **OOM**：m3u8（`:771`）、AES 密钥（`:494`）、探测（`:825/923`）三处 `await resp.read()`
     **无大小上限**（只有 hybrid / image / direct 走的 `_read_capped` 有 96MB 上限）。恶意上游可让进程 OOM。
@@ -222,8 +222,8 @@
 
 ### M6. `_forward_url` 流式转发无超时、连接池无 per-host 限制
 
-- **文件**：`ydlna/player/hls_rewriter.py:345, 261`
-- **状态**：`[ ]`
+- **文件**：`ydlna/player/hls_rewriter.py:125-128, 422-509`；`ydlna/player/_url_guard.py:210-219`
+- **状态**：`[x]` 已修复（2026-08-10）：流式请求显式传入 `ClientTimeout(total=None, connect=10, sock_read=30)`，长视频持续有数据时可无限播放，连接/连接池等待或连续读取停滞则有界结束；本地响应尚未开始时的读超时映射为 504，其他读错误映射为 502。首包读取、`stream.prepare()` 和后续传输均处于统一清理边界内，取消继续向上传播且 response 始终关闭。安全 session 已有的总 64 / 单 host 16 连接池限制新增回归测试，防止后续退化。
 - **问题**：转发请求不传 timeout，落到 session 默认 `total=300s`；session 无 `limit_per_host`，
     慢速上游可挂满连接。
 - **建议**：见 H1 的 session / timeout 建议。
