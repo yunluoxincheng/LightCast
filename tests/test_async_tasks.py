@@ -100,6 +100,41 @@ def test_hls_proxy_stop_cancels_warm_tasks_before_cleanup(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_hybrid_startup_waits_only_for_first_segment(monkeypatch) -> None:
+    async def scenario() -> None:
+        proxy = hls_rewriter.HlsProxy()
+        proxy._segments = [f"seg-{index}" for index in range(6)]
+        calls: list[int] = []
+        cancelled: set[int] = set()
+
+        async def warm(index: int) -> None:
+            calls.append(index)
+            if index == 0:
+                return
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.add(index)
+
+        monkeypatch.setattr(proxy, "_warm_hybrid_segment", warm)
+
+        await proxy._warm_hybrid_startup()
+
+        # 启动路径只等待首片；后续 1-3 已注册，但尚未获得事件循环执行机会。
+        assert calls == [0]
+        assert len(proxy._background_tasks) == 3
+
+        await asyncio.sleep(0)
+        assert calls[0] == 0
+        assert set(calls[1:]) == {1, 2, 3}
+
+        await proxy.stop()
+        assert cancelled == {1, 2, 3}
+        assert len(proxy._background_tasks) == 0
+
+    asyncio.run(scenario())
+
+
 def test_application_shutdown_stops_active_proxy_warm_task_and_session(
     monkeypatch,
 ) -> None:
