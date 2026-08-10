@@ -307,24 +307,34 @@ class RendererBridge:
             except Exception as e:  # noqa: BLE001
                 log.debug("on_cast_started 回调异常: %s", e)
 
+        candidate_info = None
         try:
-            proxied = await self._setup_proxy(
+            candidate_info = await self._setup_proxy_candidate(
                 url, allow_intranet=allow_intranet
             )
-            if proxied is not None:
-                log.info("播放代理后的 URL: %s", proxied)
+            if candidate_info is not None:
+                proxy_attr, candidate = candidate_info
+                proxied = candidate.playlist_url
+                log.info("播放候选代理 URL: %s", proxied)
+                # 只有 Player 接受 candidate 后才提交媒体身份和代理引用；
+                # 此前旧代理始终保持运行，可用于完整回滚。
                 self._player.play(proxied, title)
                 self._current_uri = url
                 self._current_meta = meta or ""
+                await self._commit_proxy_candidate(proxy_attr, candidate)
                 return
             log.warning("代理初始化失败；为避免绕过 SSRF 防护，不直接播放原始 URL")
             self._fail_transport_attempt()
         except UrlBlockedError as e:
             # 代理层 SSRF 拒绝（分片/密钥/重定向目标命中黑名单）：同样绝不 fallback。
             log.warning("代理阶段 URL 被安全策略拦截: %s（%s）", url, e.reason)
+            if candidate_info is not None:
+                await self._discard_proxy_candidate(candidate_info[1])
             self._fail_transport_attempt()
         except Exception as e:  # noqa: BLE001  代理/播放失败：回滚状态，避免 UI 不一致
             log.warning("设置媒体失败: %s", e)
+            if candidate_info is not None:
+                await self._discard_proxy_candidate(candidate_info[1])
             self._fail_transport_attempt()
 
     def _write_transport_identity(self, uri: str, meta: str) -> None:
@@ -361,28 +371,52 @@ class RendererBridge:
         except Exception:  # noqa: BLE001
             return True
 
-    async def _setup_proxy(
+    async def _setup_proxy_candidate(
         self, url: str, *, allow_intranet: bool
-    ) -> Optional[str]:
-        """建立本地媒体代理，返回可播放 URL（失败返回 None）。
+    ) -> Optional[tuple[str, object]]:
+        """建立候选代理但不触碰当前代理引用（失败返回 None）。
 
         m3u8 走 HLS 重写代理，其它 http(s) 直链走 DirectProxy；
-        换媒体时先停掉旧代理（多次投屏复用同一套状态）。
+        候选代理只有在 Player.play() 成功返回后才会被提交。
         """
         from ..player.hls_rewriter import setup_direct_proxy, setup_hls_proxy
-        for attr in ("_hls_proxy", "_direct_proxy"):
-            old = getattr(self, attr, None)
-            if old is not None and old.running:
-                await old.stop()
         if ".m3u8" in url.lower():
             proxy = await setup_hls_proxy(url, allow_intranet=allow_intranet)
-            self._hls_proxy = proxy
+            proxy_attr = "_hls_proxy"
         else:
             proxy = await setup_direct_proxy(url, allow_intranet=allow_intranet)
-            self._direct_proxy = proxy
+            proxy_attr = "_direct_proxy"
         if proxy is None:
             return None
-        return proxy.playlist_url
+        return proxy_attr, proxy
+
+    async def _discard_proxy_candidate(self, candidate) -> None:  # noqa: ANN001
+        """Player 未接受候选代理时只清理 candidate，绝不触碰旧代理。"""
+        try:
+            await candidate.stop()
+        except Exception as e:  # noqa: BLE001
+            log.warning("清理未提交候选代理失败: %s", e)
+
+    async def _commit_proxy_candidate(self, proxy_attr: str, candidate) -> None:  # noqa: ANN001
+        """提交 candidate 后退休全部旧代理；调用前 Player 已接受新 URL。"""
+        old_proxies = tuple(
+            (attr, getattr(self, attr, None))
+            for attr in ("_hls_proxy", "_direct_proxy")
+        )
+        setattr(self, proxy_attr, candidate)
+
+        for attr, old in old_proxies:
+            if old is None or old is candidate:
+                continue
+            try:
+                if old.running:
+                    await old.stop()
+            except Exception as e:  # noqa: BLE001
+                log.warning("停止已替换媒体代理失败（%s）: %s", attr, e)
+            finally:
+                # 同类型 attr 已指向 candidate 时不能被旧代理清理覆盖。
+                if getattr(self, attr, None) is old:
+                    setattr(self, attr, None)
 
     def on_play(self) -> None:
         log.info("桥接: 播放")

@@ -13,8 +13,11 @@ class _FakePlayer:
         self.played: list[tuple[str, str]] = []
         self.state = "stopped"
         self.url = ""
+        self.raise_on_play = False
 
     def play(self, url: str, title: str) -> None:
+        if self.raise_on_play:
+            raise RuntimeError("mpv rejected candidate")
         self.played.append((url, title))
         self.state = "playing"
         self.url = url
@@ -29,6 +32,20 @@ class _FakePlayer:
 class _StateVariable:
     def __init__(self, value: str) -> None:
         self.value = value
+
+
+class _FakeProxy:
+    def __init__(self, playlist_url: str, stop_hook=None) -> None:  # noqa: ANN001
+        self.playlist_url = playlist_url
+        self.running = True
+        self.stop_calls = 0
+        self._stop_hook = stop_hook
+
+    async def stop(self) -> None:
+        if self._stop_hook is not None:
+            self._stop_hook()
+        self.stop_calls += 1
+        self.running = False
 
 
 class _AvTransport:
@@ -58,9 +75,20 @@ def _bridge_with_setup(setup):  # noqa: ANN001, ANN202
     bridge._transport_status = "OK"
     bridge._current_uri = previous_uri
     bridge._current_meta = previous_meta
+    bridge._hls_proxy = None
+    bridge._direct_proxy = None
     bridge.on_cast_started = None
     bridge._allow_intranet = lambda: True
-    bridge._setup_proxy = setup
+
+    async def setup_candidate(url: str, *, allow_intranet: bool):  # noqa: ANN202
+        result = await setup(url, allow_intranet=allow_intranet)
+        if result is None:
+            return None
+        proxy = result if isinstance(result, _FakeProxy) else _FakeProxy(result)
+        attr = "_hls_proxy" if ".m3u8" in url.lower() else "_direct_proxy"
+        return attr, proxy
+
+    bridge._setup_proxy_candidate = setup_candidate
     return bridge
 
 
@@ -112,10 +140,20 @@ def test_unexpected_proxy_failure_sets_transport_status_only() -> None:
 
 
 def test_only_local_proxy_url_is_sent_to_mpv() -> None:
+    candidate = _FakeProxy("http://127.0.0.1:54321/stream")
+
     async def setup(_url: str, *, allow_intranet: bool):  # noqa: ARG001, ANN202
-        return "http://127.0.0.1:54321/stream"
+        return candidate
 
     bridge = _bridge_with_setup(setup)
+    old_proxy = _FakeProxy(
+        "http://127.0.0.1:50001/stream",
+        stop_hook=lambda: bridge._player.played
+        or pytest.fail("旧代理在 Player 接受 candidate 前被停止"),
+    )
+    bridge._direct_proxy = old_proxy
+    bridge._player.state = "playing"
+    bridge._player.url = old_proxy.playlist_url
     bridge._set_transport_status("ERROR_OCCURRED")
     asyncio.run(bridge.on_set_uri("https://public.example/video.mp4", ""))
     assert bridge._player.played == [
@@ -125,6 +163,58 @@ def test_only_local_proxy_url_is_sent_to_mpv() -> None:
     assert bridge._avt.state_variable("TransportStatus").value == "OK"
     assert bridge._current_uri == "https://public.example/video.mp4"
     assert bridge._avt.state_variable("AVTransportURI").value == bridge._current_uri
+    assert bridge._direct_proxy is candidate
+    assert candidate.stop_calls == 0
+    assert old_proxy.stop_calls == 1
+
+
+def test_proxy_setup_failure_keeps_previous_proxy_running() -> None:
+    async def setup(_url: str, *, allow_intranet: bool):  # noqa: ARG001, ANN202
+        return None
+
+    bridge = _bridge_with_setup(setup)
+    old_proxy = _FakeProxy("http://127.0.0.1:50001/stream")
+    bridge._direct_proxy = old_proxy
+    bridge._player.state = "playing"
+    bridge._player.url = old_proxy.playlist_url
+
+    asyncio.run(bridge.on_set_uri("https://public.example/new.mp4", ""))
+
+    assert old_proxy.running is True
+    assert old_proxy.stop_calls == 0
+    assert bridge._direct_proxy is old_proxy
+    assert bridge._player.url == old_proxy.playlist_url
+    assert bridge._current_uri == "https://previous.example/video.mp4"
+    assert bridge._avt.state_variable("AVTransportURI").value == bridge._current_uri
+    assert bridge._avt.state_variable("TransportState").value == "PLAYING"
+    assert bridge._avt.state_variable("TransportStatus").value == "ERROR_OCCURRED"
+
+
+def test_player_rejection_discards_candidate_and_keeps_previous_proxy() -> None:
+    candidate = _FakeProxy("http://127.0.0.1:50002/stream")
+
+    async def setup(_url: str, *, allow_intranet: bool):  # noqa: ARG001, ANN202
+        return candidate
+
+    bridge = _bridge_with_setup(setup)
+    old_proxy = _FakeProxy("http://127.0.0.1:50001/stream")
+    bridge._direct_proxy = old_proxy
+    bridge._player.state = "playing"
+    bridge._player.url = old_proxy.playlist_url
+    bridge._player.raise_on_play = True
+
+    asyncio.run(bridge.on_set_uri("https://public.example/new.mp4", ""))
+
+    assert candidate.running is False
+    assert candidate.stop_calls == 1
+    assert old_proxy.running is True
+    assert old_proxy.stop_calls == 0
+    assert bridge._direct_proxy is old_proxy
+    assert bridge._player.url == old_proxy.playlist_url
+    assert bridge._current_uri == "https://previous.example/video.mp4"
+    assert bridge._avt.state_variable("AVTransportURI").value == bridge._current_uri
+    assert bridge._avt.state_variable("TransportState").value == "PLAYING"
+    assert bridge._avt.state_variable("TransportStatus").value == "ERROR_OCCURRED"
 
 
 def test_concurrent_set_uri_requests_are_serialized_and_latest_wins() -> None:
