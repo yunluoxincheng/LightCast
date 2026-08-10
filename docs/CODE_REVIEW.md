@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：82 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-10）：84 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 错误状态/并发 SetURI/代理资源事务及窗口几何迁移；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -223,7 +223,7 @@
 ### M6. `_forward_url` 流式转发无超时、连接池无 per-host 限制
 
 - **文件**：`ydlna/player/hls_rewriter.py:125-128, 422-509`；`ydlna/player/_url_guard.py:210-219`
-- **状态**：`[x]` 已修复（2026-08-10）：流式请求显式传入 `ClientTimeout(total=None, connect=10, sock_read=30)`，长视频持续有数据时可无限播放，连接/连接池等待或连续读取停滞则有界结束；本地响应尚未开始时的读超时映射为 504，其他读错误映射为 502，取消继续向上传播且 response 始终关闭。安全 session 已有的总 64 / 单 host 16 连接池限制新增回归测试，防止后续退化。
+- **状态**：`[x]` 已修复（2026-08-10）：流式请求显式传入 `ClientTimeout(total=None, connect=10, sock_read=30)`，长视频持续有数据时可无限播放，连接/连接池等待或连续读取停滞则有界结束；本地响应尚未开始时的读超时映射为 504，其他读错误映射为 502。首包读取、`stream.prepare()` 和后续传输均处于统一清理边界内，取消继续向上传播且 response 始终关闭。安全 session 已有的总 64 / 单 host 16 连接池限制新增回归测试，防止后续退化。
 - **问题**：转发请求不传 timeout，落到 session 默认 `total=300s`；session 无 `limit_per_host`，
     慢速上游可挂满连接。
 - **建议**：见 H1 的 session / timeout 建议。

@@ -487,8 +487,10 @@ class _BaseProxy:
         for h in ("Content-Length", "Content-Range", "Accept-Ranges", "Cache-Control"):
             if h in resp.headers:
                 stream.headers[h] = resp.headers[h]
-        await stream.prepare(request)
+        prepared = False
         try:
+            await stream.prepare(request)
+            prepared = True
             if first:
                 await stream.write(first)
             async for chunk in resp.content.iter_chunked(64 * 1024):
@@ -498,11 +500,15 @@ class _BaseProxy:
                     log.debug("客户端提前断开（正常）")
                     break
         except asyncio.TimeoutError:
+            if not prepared:
+                raise
             log.warning("%s上游流式读取超时: %s", what, real_url)
         except asyncio.CancelledError:
             log.debug("%s传输中断", what)
             raise
         except (aiohttp.ClientError, ConnectionResetError, ConnectionError, OSError):
+            if not prepared:
+                raise
             log.debug("%s传输中断", what)
         finally:
             resp.close()
