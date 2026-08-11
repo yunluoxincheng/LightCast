@@ -2,14 +2,178 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
+from PySide6.QtCore import QObject
 
-from ydlna.app import _change_service_state, _start_configured_service
+from ydlna.app import (
+    _change_service_state,
+    _connect_shutdown_requests,
+    _start_configured_service,
+)
 from ydlna.async_tasks import BackgroundTasks
 from ydlna.dlna.renderer_bridge import RendererBridge
 from ydlna.dlna.server import DlnaServer
 from ydlna.player import hls_rewriter
+
+
+class _FakeSignal:
+    def __init__(self) -> None:
+        self.callback = None
+
+    def connect(self, callback, *_args) -> None:  # noqa: ANN001
+        self.callback = callback
+
+    def emit(self, *args) -> None:  # noqa: ANN001
+        assert self.callback is not None
+        self.callback(*args)
+
+
+class _QuitSources(QObject):
+    def __init__(self) -> None:
+        super().__init__()
+        self.commitDataRequest = _FakeSignal()
+        self.quitRequested = _FakeSignal()
+        self.applicationQuitRequested = _FakeSignal()
+        self.actQuit = type("Action", (), {"triggered": _FakeSignal()})()
+        self.settingsInterface = type(
+            "Settings",
+            (),
+            {"applicationQuitRequested": self.applicationQuitRequested},
+        )()
+        self.event_filter = None
+
+    def installEventFilter(self, event_filter) -> None:  # noqa: ANN001, N802
+        self.event_filter = event_filter
+
+
+def test_tray_quit_requests_async_shutdown_without_stopping_event_loop() -> None:
+    async def scenario() -> None:
+        app = _QuitSources()
+        tray = _QuitSources()
+        window = _QuitSources()
+        stop_event = asyncio.Event()
+
+        _connect_shutdown_requests(app, tray, window, stop_event)
+        tray.actQuit.triggered.emit(False)
+
+        assert stop_event.is_set()
+        assert asyncio.get_running_loop().is_running()
+
+    asyncio.run(scenario())
+
+
+def test_system_close_requests_same_async_shutdown_path() -> None:
+    async def scenario() -> None:
+        app = _QuitSources()
+        tray = _QuitSources()
+        window = _QuitSources()
+        stop_event = asyncio.Event()
+
+        _connect_shutdown_requests(app, tray, window, stop_event)
+        window.quitRequested.emit()
+
+        assert stop_event.is_set()
+        assert asyncio.get_running_loop().is_running()
+
+    asyncio.run(scenario())
+
+
+def test_session_commit_requests_shutdown_before_qt_quit() -> None:
+    async def scenario() -> None:
+        app = _QuitSources()
+        tray = _QuitSources()
+        window = _QuitSources()
+        stop_event = asyncio.Event()
+
+        _connect_shutdown_requests(app, tray, window, stop_event)
+        app.commitDataRequest.emit(object())
+
+        assert stop_event.is_set()
+        assert asyncio.get_running_loop().is_running()
+
+    asyncio.run(scenario())
+
+
+def test_installer_launch_requests_same_async_shutdown_path() -> None:
+    async def scenario() -> None:
+        app = _QuitSources()
+        tray = _QuitSources()
+        window = _QuitSources()
+        stop_event = asyncio.Event()
+
+        _connect_shutdown_requests(app, tray, window, stop_event)
+        window.settingsInterface.applicationQuitRequested.emit()
+
+        assert stop_event.is_set()
+        assert asyncio.get_running_loop().is_running()
+
+    asyncio.run(scenario())
+
+
+def test_qt_quit_is_gated_until_qasync_cleanup_completes() -> None:
+    """真实 QApplication.quit 不得抢先停止 qasync 的清理协程。"""
+    script = textwrap.dedent(
+        """
+        import asyncio
+        from types import SimpleNamespace
+
+        from PySide6.QtCore import QTimer, Signal, QObject
+        from PySide6.QtWidgets import QApplication
+        from qasync import QEventLoop
+
+        from ydlna.app import _connect_shutdown_requests
+
+
+        class Source(QObject):
+            triggered = Signal(bool)
+            quitRequested = Signal()
+            applicationQuitRequested = Signal()
+
+
+        app = QApplication([])
+        app.setQuitOnLastWindowClosed(False)
+        loop = QEventLoop(app)
+        asyncio.set_event_loop(loop)
+        source = Source()
+        tray = SimpleNamespace(actQuit=SimpleNamespace(triggered=source.triggered))
+        settings = SimpleNamespace(applicationQuitRequested=source.applicationQuitRequested)
+        window = SimpleNamespace(quitRequested=source.quitRequested, settingsInterface=settings)
+        cleaned = []
+
+
+        async def scenario():
+            stop_event = asyncio.Event()
+            gate = _connect_shutdown_requests(app, tray, window, stop_event)
+            QTimer.singleShot(0, app.quit)
+            await stop_event.wait()
+            await asyncio.sleep(0)
+            cleaned.append(True)
+            app.removeEventFilter(gate)
+
+
+        with loop:
+            loop.run_until_complete(scenario())
+        assert cleaned == [True]
+        """
+    )
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=os.getcwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_background_tasks_keep_reference_and_cancel_on_shutdown() -> None:

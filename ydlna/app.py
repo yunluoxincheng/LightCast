@@ -13,7 +13,7 @@ import asyncio
 import sys
 from typing import Any
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal, Slot
 from qfluentwidgets import Theme, setTheme, setThemeColor
 
 from .async_tasks import BackgroundTasks
@@ -46,6 +46,25 @@ class _AppSignals(QObject):
 
     # 收到新的媒体投屏：(title, url)
     castReceived = Signal(str, str)
+
+
+class _QtQuitGate(QObject):
+    """把 Qt Quit/session 请求转换为异步停止请求，保护 qasync 清理阶段。"""
+
+    def __init__(self, request_stop: Any, parent: QObject) -> None:
+        super().__init__(parent)
+        self._request_stop = request_stop
+
+    @Slot(object)
+    def request_session_shutdown(self, _manager: object) -> None:
+        """Qt session manager 的 DirectConnection 入口；信号内不直接退出。"""
+        self._request_stop()
+
+    def eventFilter(self, _watched, event) -> bool:  # noqa: ANN001, N802
+        if event.type() == QEvent.Type.Quit:
+            self._request_stop()
+            return True
+        return False
 
 
 async def _change_service_state(
@@ -88,6 +107,25 @@ async def _start_configured_service(
         return
     log.info("自动启动 DLNA 服务")
     await _change_service_state(server, window, config, True)
+
+
+def _connect_shutdown_requests(
+    app: Any,
+    tray: Any,
+    window: Any,
+    stop_event: asyncio.Event,
+) -> _QtQuitGate:
+    """把退出入口转换为异步停止请求，不提前终止 qasync 事件循环。"""
+    tray.actQuit.triggered.connect(lambda *_args: stop_event.set())
+    window.quitRequested.connect(stop_event.set)
+    window.settingsInterface.applicationQuitRequested.connect(stop_event.set)
+    quit_gate = _QtQuitGate(stop_event.set, app)
+    app.installEventFilter(quit_gate)
+    app.commitDataRequest.connect(
+        quit_gate.request_session_shutdown,
+        Qt.ConnectionType.DirectConnection,
+    )
+    return quit_gate
 
 
 async def run() -> int:
@@ -136,6 +174,7 @@ async def run() -> int:
     bridge = RendererBridge(player)
     server = DlnaServer(bridge, config)
     background_tasks = BackgroundTasks()
+    stop_event = asyncio.Event()
 
     # UI
     window = MainWindow(player, server, config)
@@ -193,7 +232,8 @@ async def run() -> int:
     tray.actShow.triggered.connect(lambda: (window.show(), window.raise_()))
     tray.actPlayPause.triggered.connect(player.play_pause)
     tray.actStop.triggered.connect(player.stop)
-    tray.actQuit.triggered.connect(app.quit)
+    # 强引用 gate 直到 run() 返回；异步清理完成前它会拦截 Qt Quit 事件。
+    quit_gate = _connect_shutdown_requests(app, tray, window, stop_event)
 
     # 播放器页的全屏请求 → 主窗口全屏（隐藏导航栏）
     window.playerInterface.toggleFullscreenRequested.connect(window.toggle_fullscreen)
@@ -254,10 +294,12 @@ async def run() -> int:
                 log.info("发现新版本 v%s", info.version)
                 # 静默托盘模式下提示框不能挂在隐藏窗口上
                 parent = window if window.isVisible() else None
-                await run_update_flow(
+                installer_started = await run_update_flow(
                     parent, info,
                     use_mirror=bool(config.get("update_mirror", True)),
                 )
+                if installer_started:
+                    stop_event.set()
 
         background_tasks.create(_do(), name="startup-update-check")
 
@@ -273,8 +315,6 @@ async def run() -> int:
     await _start_configured_service(server, window, config)
 
     # 等待退出
-    stop_event = asyncio.Event()
-    app.aboutToQuit.connect(stop_event.set)
     await stop_event.wait()
 
     # 清理
@@ -287,5 +327,6 @@ async def run() -> int:
         log.warning("停止服务异常: %s", e)
     await bridge.shutdown_all()
     player.shutdown()
+    app.removeEventFilter(quit_gate)
 
     return 0

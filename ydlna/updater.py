@@ -411,7 +411,7 @@ async def run_update_flow(parent, info: UpdateInfo, *, use_mirror: bool = True) 
 
     返回 True 表示已启动安装程序（应用即将退出）；False 表示用户取消或失败。
     """
-    from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QVBoxLayout
+    from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QVBoxLayout
     from qfluentwidgets import InfoBar, InfoBarPosition, ProgressBar, PushButton
 
     from .i18n import tr
@@ -568,8 +568,8 @@ async def run_update_flow(parent, info: UpdateInfo, *, use_mirror: bool = True) 
     if box2.clickedButton() is not install_btn:
         return False
 
-    # 4. 启动安装程序并退出（安装版会替换程序文件，必须先释放占用）
+    # 4. 启动安装程序。调用方收到 True 后请求应用走异步清理退出；不能在
+    # 此处直接 QApplication.quit()，否则 qasync loop 会先于清理协程停止。
     log.info("启动安装程序: %s", dest)
     os.startfile(str(dest))  # type: ignore[attr-defined]  # Windows only
-    QApplication.instance().quit()
     return True

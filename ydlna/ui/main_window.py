@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QIcon
 from qfluentwidgets import (
     FluentIcon as FIF,
@@ -26,26 +26,77 @@ if TYPE_CHECKING:
 log = get_logger("ui.main")
 
 DEFAULT_WINDOW_SIZE = (1200, 800)
-WINDOW_GEOMETRY_VERSION_KEY = "window_geometry_v7"
+WINDOW_GEOMETRY_VERSION_KEY = "window_geometry_v8"
+
+# 开机自启时窗口从未显示，Qt 首次 polish 曾把它压到 minimumSize；无边框
+# 外框保存出的实际 geometry 约为 914×614。只迁移这一小段异常范围，避免
+# 再次无条件清除用户正常拖拽得到的较大自定义尺寸。
+_COLLAPSED_GEOMETRY_MAX = (930, 630)
+
+
+def _parse_geometry(value: object) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, list) or len(value) != 4:
+        return None
+    try:
+        x, y, width, height = (int(item) for item in value)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return x, y, width, height
 
 
 def _geometry_to_restore(config: Config) -> tuple[int, int, int, int] | None:
-    """返回可恢复的窗口几何；进入 1200×800 基准时统一重置一次旧几何。"""
+    """返回可恢复几何，并一次性清理开机自启污染的最小尺寸。"""
+    geom = _parse_geometry(config.get("window_geometry"))
     if not config.get(WINDOW_GEOMETRY_VERSION_KEY, False):
-        # 旧版 v1-v6 的窗口基准不再保留。先清掉旧几何再持久化当前标记：
-        # 即使本次启动未正常 close，下次也不会重新恢复迁移前的尺寸/位置。
-        config.set("window_geometry", None, persist=False)
+        if (
+            geom is not None
+            and geom[2] <= _COLLAPSED_GEOMETRY_MAX[0]
+            and geom[3] <= _COLLAPSED_GEOMETRY_MAX[1]
+        ):
+            config.set("window_geometry", None, persist=False)
+            geom = None
         config.set(WINDOW_GEOMETRY_VERSION_KEY, True)
-        return None
+    return geom
 
-    geom = config.get("window_geometry")
-    if not isinstance(geom, list) or len(geom) != 4:
-        return None
-    try:
-        x, y, width, height = (int(value) for value in geom)
-        return x, y, width, height
-    except (TypeError, ValueError):
-        return None
+
+class _StartupGeometryGuard(QObject):
+    """首次 Show 完成 Qt polish 后，重新应用启动窗口几何。"""
+
+    def __init__(
+        self,
+        window: QWidget,
+        geometry: tuple[int, int, int, int] | None,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._geometry = geometry
+        self._pending = True
+        window.installEventFilter(self)
+
+    @property
+    def can_save(self) -> bool:
+        """首次显示校正完成后，窗口几何才可持久化。"""
+        return not self._pending
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: ANN001, N802
+        if (
+            watched is self._window
+            and event.type() == QEvent.Type.Show
+            and self._pending
+        ):
+            QTimer.singleShot(0, self._apply)
+        return False
+
+    def _apply(self) -> None:
+        if not self._pending:
+            return
+        if self._geometry is None:
+            self._window.resize(*DEFAULT_WINDOW_SIZE)
+        else:
+            self._window.setGeometry(*self._geometry)
+        self._pending = False
 
 
 class MainWindow(MSFluentWindow):
@@ -53,6 +104,8 @@ class MainWindow(MSFluentWindow):
 
     # 用户关闭窗口时（用于决定是否最小化到托盘）
     closing = Signal()
+    # 托盘退出或系统关闭必须先让 app.run() 完成异步清理，不能直接停 Qt loop。
+    quitRequested = Signal()
 
     def __init__(
         self,
@@ -98,6 +151,7 @@ class MainWindow(MSFluentWindow):
         geom = _geometry_to_restore(config)
         if geom is not None:
             self.setGeometry(*geom)
+        self._startup_geometry_guard = _StartupGeometryGuard(self, geom)
 
         # 设置图标（若有）
         icon = self._load_icon()
@@ -211,15 +265,16 @@ class MainWindow(MSFluentWindow):
         关闭请求）不走托盘逻辑：保存几何后直接退出进程——否则应用会
         赖在托盘不退出，安装器无法覆盖升级 exe（只能等强杀）。
         """
-        # 保存几何
-        g = self.geometry()
-        self._config.set("window_geometry", [g.x(), g.y(), g.width(), g.height()])
+        # 开机自启后从未显示过的窗口可能仍处于 Qt 隐藏布局的临时最小尺寸；
+        # 只有首次显示校正完成后，当前 geometry 才代表用户真正看到的窗口。
+        if self._startup_geometry_guard.can_save:
+            g = self.geometry()
+            self._config.set("window_geometry", [g.x(), g.y(), g.width(), g.height()])
 
         if event.spontaneous():
             # 系统/安装器触发的关闭：优雅退出（不弹最小化提示，不残留进程）
             log.info("系统触发的关闭（关机/注销/安装器关闭请求），直接退出")
-            from PySide6.QtWidgets import QApplication
-            QApplication.instance().quit()
+            self.quitRequested.emit()
             event.accept()
             return
 
