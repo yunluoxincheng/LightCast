@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import textwrap
+
 from ydlna.config import DEFAULTS
 from ydlna.ui.main_window import (
     DEFAULT_WINDOW_SIZE,
@@ -65,3 +70,43 @@ def test_window_v8_restores_geometry_saved_after_migration() -> None:
 
     assert _geometry_to_restore(config) == (20, 30, 1280, 850)  # type: ignore[arg-type]
     assert config.set_calls == []
+
+
+def test_hidden_window_first_show_reapplies_exact_default_geometry() -> None:
+    """用真实 QWidget Show/polish/timer 生命周期锁定开机自启修复。"""
+    script = textwrap.dedent(
+        """
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        from ydlna.ui.main_window import DEFAULT_WINDOW_SIZE, _StartupGeometryGuard
+
+
+        app = QApplication([])
+        window = QWidget()
+        window.setMinimumSize(900, 600)
+        window.resize(914, 614)
+        guard = _StartupGeometryGuard(window, None)
+        assert not guard.can_save
+
+        window.show()
+        QTimer.singleShot(20, app.quit)
+        app.exec()
+
+        assert guard.can_save
+        assert (window.width(), window.height()) == DEFAULT_WINDOW_SIZE
+        """
+    )
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=os.getcwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

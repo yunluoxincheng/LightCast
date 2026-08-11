@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QIcon, QShowEvent
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QIcon
 from qfluentwidgets import (
     FluentIcon as FIF,
     MSFluentWindow,
@@ -61,6 +61,44 @@ def _geometry_to_restore(config: Config) -> tuple[int, int, int, int] | None:
     return geom
 
 
+class _StartupGeometryGuard(QObject):
+    """首次 Show 完成 Qt polish 后，重新应用启动窗口几何。"""
+
+    def __init__(
+        self,
+        window: QWidget,
+        geometry: tuple[int, int, int, int] | None,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._geometry = geometry
+        self._pending = True
+        window.installEventFilter(self)
+
+    @property
+    def can_save(self) -> bool:
+        """首次显示校正完成后，窗口几何才可持久化。"""
+        return not self._pending
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: ANN001, N802
+        if (
+            watched is self._window
+            and event.type() == QEvent.Type.Show
+            and self._pending
+        ):
+            QTimer.singleShot(0, self._apply)
+        return False
+
+    def _apply(self) -> None:
+        if not self._pending:
+            return
+        if self._geometry is None:
+            self._window.resize(*DEFAULT_WINDOW_SIZE)
+        else:
+            self._window.setGeometry(*self._geometry)
+        self._pending = False
+
+
 class MainWindow(MSFluentWindow):
     """主窗口。"""
 
@@ -111,10 +149,9 @@ class MainWindow(MSFluentWindow):
         self.resize(*DEFAULT_WINDOW_SIZE)
         self.setMinimumSize(900, 600)
         geom = _geometry_to_restore(config)
-        self._startup_geometry = geom
-        self._startup_geometry_pending = True
         if geom is not None:
             self.setGeometry(*geom)
+        self._startup_geometry_guard = _StartupGeometryGuard(self, geom)
 
         # 设置图标（若有）
         icon = self._load_icon()
@@ -196,23 +233,6 @@ class MainWindow(MSFluentWindow):
     def refresh_device_info(self, name: str, ip: str) -> None:
         self.homeInterface.update_device_info(name, ip)
 
-    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
-        """首次真正显示后重放启动几何，抵消隐藏窗口 polish 的尺寸压缩。"""
-        super().showEvent(event)
-        if not self._startup_geometry_pending:
-            return
-        QTimer.singleShot(0, self._apply_startup_geometry)
-
-    def _apply_startup_geometry(self) -> None:
-        if not self._startup_geometry_pending:
-            return
-        geom = self._startup_geometry
-        if geom is None:
-            self.resize(*DEFAULT_WINDOW_SIZE)
-        else:
-            self.setGeometry(*geom)
-        self._startup_geometry_pending = False
-
     # ------------------------------------------------------------------ #
     def _set_nav_text(self, widget: QWidget, text: str) -> None:  # noqa: ANN001
         """设置左侧导航项的文本（按 widget 的 objectName 查找）。"""
@@ -247,7 +267,7 @@ class MainWindow(MSFluentWindow):
         """
         # 开机自启后从未显示过的窗口可能仍处于 Qt 隐藏布局的临时最小尺寸；
         # 只有首次显示校正完成后，当前 geometry 才代表用户真正看到的窗口。
-        if not self._startup_geometry_pending:
+        if self._startup_geometry_guard.can_save:
             g = self.geometry()
             self._config.set("window_geometry", [g.x(), g.y(), g.width(), g.height()])
 

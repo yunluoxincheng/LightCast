@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-12）：149 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、HLS 启动/后台预热、缓存 single-flight 与代理路由索引校验、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 时间/错误状态/并发 SetURI/代理资源事务、窗口几何迁移及应用退出事件循环顺序；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-12）：152 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、HLS 启动/后台预热、缓存 single-flight 与代理路由索引校验、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 时间/错误状态/并发 SetURI/代理资源事务、窗口几何迁移、真实 QWidget Show 及 QApplication/qasync 退出时序；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -162,7 +162,7 @@
 ### H6. asyncio task 未持有引用 + 退出未取消
 
 - **文件**：`ydlna/app.py:147, 221`；`ydlna/ui/settings_interface.py:332`；`ydlna/player/hls_rewriter.py:563`
-- **状态**：`[x]` 已修复（2026-08-12 更新）：新增 `BackgroundTasks` 统一持有后台任务、完成后取出异常并移除引用、组件退出时 cancel + gather；应用启停/自动更新、设置页手动更新、DLNA 进度轮询和 HLS 预热均纳入对应生命周期。同步关闭服务只对轮询发出一次 cancel，应用最终退出的 `RendererBridge.shutdown_all()` 会等待注册表中的轮询真正结束，再停止并清空当前 HLS / Direct proxy。代理停止会先等待预热任务取消再关闭 session；`_read_capped` 不再吞掉 `CancelledError`，所有调用点以 `finally` 关闭响应。托盘退出、系统关闭和安装器启动不再提前调用 `QApplication.quit()` 停止 qasync loop，而是先设置应用停止事件，让上述异步清理在仍运行的事件循环内完成后由主协程正常返回。
+- **状态**：`[x]` 已修复（2026-08-12 更新）：新增 `BackgroundTasks` 统一持有后台任务、完成后取出异常并移除引用、组件退出时 cancel + gather；应用启停/自动更新、设置页手动更新、DLNA 进度轮询和 HLS 预热均纳入对应生命周期。同步关闭服务只对轮询发出一次 cancel，应用最终退出的 `RendererBridge.shutdown_all()` 会等待注册表中的轮询真正结束，再停止并清空当前 HLS / Direct proxy。代理停止会先等待预热任务取消再关闭 session；`_read_capped` 不再吞掉 `CancelledError`，所有调用点以 `finally` 关闭响应。托盘退出和安装器启动直接设置应用停止事件；Windows session shutdown 通过 `commitDataRequest` 的 `DirectConnection` 尽早请求停止，应用级 Quit gate 在清理完成前消费 `QEvent.Quit`，避免 Qt 抢先停止 qasync loop。真实 QApplication/qasync 子进程测试验证 `app.quit()` 与停止请求同轮到达时清理协程仍能完成。
 - **问题**：`asyncio.create_task` / `ensure_future` 的返回值未保存。事件循环只对 task 持弱引用，
   可能被 GC 静默取消（官方文档明确警告）；退出时未取消会触发 `Task was destroyed but it is pending`
   警告。`hls_rewriter.py:563` 的预热任务同样无引用、`stop()` 不取消，旧 proxy 被任务引用住无法 GC
