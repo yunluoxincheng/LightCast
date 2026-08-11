@@ -90,6 +90,17 @@ async def _start_configured_service(
     await _change_service_state(server, window, config, True)
 
 
+def _connect_shutdown_requests(
+    tray: Any,
+    window: Any,
+    stop_event: asyncio.Event,
+) -> None:
+    """把退出入口转换为异步停止请求，不提前终止 qasync 事件循环。"""
+    tray.actQuit.triggered.connect(lambda *_args: stop_event.set())
+    window.quitRequested.connect(stop_event.set)
+    window.settingsInterface.applicationQuitRequested.connect(stop_event.set)
+
+
 async def run() -> int:
     """主协程。在 qasync 的 QEventLoop 中运行。"""
     from PySide6.QtWidgets import QApplication
@@ -136,6 +147,7 @@ async def run() -> int:
     bridge = RendererBridge(player)
     server = DlnaServer(bridge, config)
     background_tasks = BackgroundTasks()
+    stop_event = asyncio.Event()
 
     # UI
     window = MainWindow(player, server, config)
@@ -193,7 +205,7 @@ async def run() -> int:
     tray.actShow.triggered.connect(lambda: (window.show(), window.raise_()))
     tray.actPlayPause.triggered.connect(player.play_pause)
     tray.actStop.triggered.connect(player.stop)
-    tray.actQuit.triggered.connect(app.quit)
+    _connect_shutdown_requests(tray, window, stop_event)
 
     # 播放器页的全屏请求 → 主窗口全屏（隐藏导航栏）
     window.playerInterface.toggleFullscreenRequested.connect(window.toggle_fullscreen)
@@ -254,10 +266,12 @@ async def run() -> int:
                 log.info("发现新版本 v%s", info.version)
                 # 静默托盘模式下提示框不能挂在隐藏窗口上
                 parent = window if window.isVisible() else None
-                await run_update_flow(
+                installer_started = await run_update_flow(
                     parent, info,
                     use_mirror=bool(config.get("update_mirror", True)),
                 )
+                if installer_started:
+                    stop_event.set()
 
         background_tasks.create(_do(), name="startup-update-check")
 
@@ -273,8 +287,6 @@ async def run() -> int:
     await _start_configured_service(server, window, config)
 
     # 等待退出
-    stop_event = asyncio.Event()
-    app.aboutToQuit.connect(stop_event.set)
     await stop_event.wait()
 
     # 清理

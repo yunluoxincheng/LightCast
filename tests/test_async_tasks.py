@@ -5,11 +5,84 @@ import logging
 
 import pytest
 
-from ydlna.app import _change_service_state, _start_configured_service
+from ydlna.app import (
+    _change_service_state,
+    _connect_shutdown_requests,
+    _start_configured_service,
+)
 from ydlna.async_tasks import BackgroundTasks
 from ydlna.dlna.renderer_bridge import RendererBridge
 from ydlna.dlna.server import DlnaServer
 from ydlna.player import hls_rewriter
+
+
+class _FakeSignal:
+    def __init__(self) -> None:
+        self.callback = None
+
+    def connect(self, callback) -> None:  # noqa: ANN001
+        self.callback = callback
+
+    def emit(self, *args) -> None:  # noqa: ANN001
+        assert self.callback is not None
+        self.callback(*args)
+
+
+class _QuitSources:
+    def __init__(self) -> None:
+        self.quitRequested = _FakeSignal()
+        self.applicationQuitRequested = _FakeSignal()
+        self.actQuit = type("Action", (), {"triggered": _FakeSignal()})()
+        self.settingsInterface = type(
+            "Settings",
+            (),
+            {"applicationQuitRequested": self.applicationQuitRequested},
+        )()
+
+
+def test_tray_quit_requests_async_shutdown_without_stopping_event_loop() -> None:
+    async def scenario() -> None:
+        tray = _QuitSources()
+        window = _QuitSources()
+        stop_event = asyncio.Event()
+
+        _connect_shutdown_requests(tray, window, stop_event)
+        tray.actQuit.triggered.emit(False)
+
+        assert stop_event.is_set()
+        assert asyncio.get_running_loop().is_running()
+
+    asyncio.run(scenario())
+
+
+def test_system_close_requests_same_async_shutdown_path() -> None:
+    async def scenario() -> None:
+        tray = _QuitSources()
+        window = _QuitSources()
+        stop_event = asyncio.Event()
+
+        _connect_shutdown_requests(tray, window, stop_event)
+        window.quitRequested.emit()
+
+        assert stop_event.is_set()
+        assert asyncio.get_running_loop().is_running()
+
+    asyncio.run(scenario())
+
+
+def test_installer_launch_requests_same_async_shutdown_path() -> None:
+    async def scenario() -> None:
+        tray = _QuitSources()
+        window = _QuitSources()
+        stop_event = asyncio.Event()
+
+        _connect_shutdown_requests(tray, window, stop_event)
+        window.settingsInterface.applicationQuitRequested.emit()
+
+        assert stop_event.is_set()
+        assert asyncio.get_running_loop().is_running()
+
+    asyncio.run(scenario())
 
 
 def test_background_tasks_keep_reference_and_cancel_on_shutdown() -> None:

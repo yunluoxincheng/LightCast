@@ -66,6 +66,8 @@ class SettingsInterface(QWidget):
 
     # 部分设置需要重启生效
     restartRequested = Signal()
+    # 安装器已启动：请求应用先完成异步资源清理，再结束进程。
+    applicationQuitRequested = Signal()
 
     def __init__(self, config: Config, player: "Player", parent=None) -> None:  # noqa: ANN001
         super().__init__(parent)
@@ -330,10 +332,12 @@ class SettingsInterface(QWidget):
                         position=InfoBarPosition.TOP,
                     )
                 else:
-                    await run_update_flow(
+                    installer_started = await run_update_flow(
                         self.window(), info,
                         use_mirror=bool(self._config.get("update_mirror", True)),
                     )
+                    if installer_started:
+                        self.applicationQuitRequested.emit()
             finally:
                 btn.setEnabled(True)
                 btn.setText(tr("settings.check_update"))

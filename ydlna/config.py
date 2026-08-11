@@ -37,9 +37,9 @@ DEFAULTS: dict[str, Any] = {
     "update_mirror": True,
     # 窗口几何（x, y, w, h），None 表示用系统默认
     "window_geometry": None,
-    # 当前唯一的默认窗口尺寸迁移标记：首次进入 1200×800 基准时重置旧几何，
-    # 此后继续保存用户通过拖拽边框调整后的窗口位置和尺寸。
-    "window_geometry_v7": False,
+    # 当前窗口几何迁移标记：v8 会清理开机自启首次显示时被布局错误压缩并
+    # 持久化的最小尺寸；正常的用户自定义位置和尺寸仍会保留。
+    "window_geometry_v8": False,
     # 是否已提示过「关闭即最小化到托盘」
     "minimize_hint_shown": False,
     # 投屏 URL 是否允许指向内网私有地址（手机、NAS 等）。

@@ -34,8 +34,6 @@ def _bootstrap() -> int:
     # 用 qasync 的 QEventLoop 运行主协程
     loop = QEventLoop(app)
     asyncio.set_event_loop(loop)
-    app_close_event = asyncio.Event()
-    app.aboutToQuit.connect(app_close_event.set)
 
     with loop:
         try:
