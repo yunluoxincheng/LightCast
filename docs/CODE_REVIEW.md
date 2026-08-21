@@ -72,7 +72,7 @@
 ### 🔴 C3. 测试目录为空，核心模块 0% 覆盖；CI 无任何质量门禁
 
 - **文件**：`tests/`；`.github/workflows/release.yml`
-- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-21）：156 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、HLS 启动/后台预热、缓存 single-flight 与代理路由索引校验、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 时间/错误状态/并发 SetURI/代理资源事务、窗口几何迁移与多屏可见性、真实 QWidget Show 及 QApplication/qasync 退出时序；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
+- **状态**：`[x]` 安全关键路径已建立正式回归门禁（2026-08-21）：157 个 pytest 用例覆盖 SSRF 重定向/解析/fallback、私网开关、AES key 边界、Pillow 像素限制、更新 SHA-256、流式上游超时与连接池限制、HLS 启动/后台预热、缓存 single-flight 与代理路由索引校验、后台任务退出清理、SSDP 线程生命周期、mpv shutdown 屏障、工作线程到 Qt 主线程的投递、DLNA 时间/错误状态/并发 SetURI/代理资源事务、窗口几何迁移与多屏标题栏可见性、真实 QWidget Show 及 QApplication/qasync 退出时序；PR 与发布构建均先运行 Windows test job。全项目覆盖率、ruff/mypy/bandit 仍属后续工程化工作。
 - **问题**：`ydlna/` 6300 行、28 模块，`tests/` 下 `git ls-files` 无任何条目，无 pytest / conftest。
   CI 是 tag 推送即构建即发布，**无 pytest / ruff / mypy / bandit**。最该测的 `updater.py`
   （下载并执行 exe）和 `hls_rewriter.py`（951 行、分支极多）完全裸奔。
@@ -280,7 +280,7 @@
 ### M13. 几何恢复不校验
 
 - **文件**：`ydlna/ui/main_window.py:51-101, 190`
-- **状态**：`[x]` 已修复（2026-08-21）：启动恢复前读取所有 `QScreen.availableGeometry()`，保存窗口必须与任一屏幕工作区存在至少 `80×48` 的可操作交集；完全落在已拔除副屏或仅剩极小边缘像素时清除失效 geometry，回退到系统可见位置和默认 `1200×800`。合法的多屏负坐标和副屏自定义位置仍正常恢复。新增测试覆盖主屏/副屏、拔屏、负坐标及可见交集边界。
+- **状态**：`[x]` 已修复（2026-08-21）：启动恢复前读取所有 `QScreen.availableGeometry()`，保存窗口顶部 `48px` 拖动区域必须与任一屏幕工作区存在至少 `80×24` 的可操作交集；完全落在已拔除副屏、仅剩极小边缘或只有窗口底部内容可见时清除失效 geometry，回退到系统可见位置和默认 `1200×800`。合法的多屏负坐标和副屏自定义位置仍正常恢复。新增测试覆盖主屏/副屏、拔屏、负坐标、左上角标题栏与右下角内容 sliver 的对称边界。
 - **问题**：直接信任保存的 `[x,y,w,h]`，拔副屏后窗口可能恢复到屏幕外「看不见」。
 - **建议**：恢复前用 `QScreen.availableGeometry()` 校验窗口至少有部分在可用区内，否则丢弃。
 

@@ -80,11 +80,19 @@ def test_geometry_visibility_accepts_window_on_any_connected_screen() -> None:
     assert _is_geometry_visible((-2000, 100, 1200, 800), screens) is False
 
 
-def test_geometry_visibility_rejects_unusable_edge_sliver() -> None:
+def test_geometry_visibility_accepts_visible_top_left_title_bar_area() -> None:
     screens = [(0, 0, 1920, 1040)]
 
-    assert _is_geometry_visible((1870, 100, 1200, 800), screens) is False
     assert _is_geometry_visible((1840, 992, 1200, 800), screens) is True
+
+
+def test_geometry_visibility_rejects_bottom_right_sliver_without_title_bar() -> None:
+    screens = [(0, 0, 1920, 1040)]
+
+    # 整个窗口仍有 80×48 可见，但露出的是右下角，顶部拖动区完全离屏。
+    assert _is_geometry_visible((-1120, -752, 1200, 800), screens) is False
+    # 右侧只剩 50px 标题栏也不足以可靠拖回。
+    assert _is_geometry_visible((1870, 100, 1200, 800), screens) is False
 
 
 def test_geometry_restore_discards_position_left_on_disconnected_monitor() -> None:

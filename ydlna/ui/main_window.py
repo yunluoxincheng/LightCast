@@ -32,8 +32,9 @@ WINDOW_GEOMETRY_VERSION_KEY = "window_geometry_v8"
 # 外框保存出的实际 geometry 约为 914×614。只迁移这一小段异常范围，避免
 # 再次无条件清除用户正常拖拽得到的较大自定义尺寸。
 _COLLAPSED_GEOMETRY_MAX = (930, 630)
-# 至少保留一块足以拖动/识别窗口的可见区域；仅剩几个像素不算可恢复。
-_MIN_VISIBLE_SIZE = (80, 48)
+# 无边框窗口必须保留可拖动的顶部区域；仅窗口内容/右下角可见无法移回屏幕。
+_TITLE_BAR_HEIGHT = 48
+_MIN_VISIBLE_TITLE_BAR_SIZE = (80, 24)
 
 
 def _parse_geometry(value: object) -> tuple[int, int, int, int] | None:
@@ -52,13 +53,14 @@ def _is_geometry_visible(
     geometry: tuple[int, int, int, int],
     available_geometries: list[tuple[int, int, int, int]],
 ) -> bool:
-    """保存的窗口在任一屏幕工作区内至少保留一块可操作区域。"""
-    window_rect = QRect(*geometry)
+    """保存窗口的顶部拖动区域在任一屏幕工作区内仍可实际操作。"""
+    x, y, width, _height = geometry
+    title_bar_rect = QRect(x, y, width, _TITLE_BAR_HEIGHT)
     for screen_geometry in available_geometries:
-        visible = window_rect.intersected(QRect(*screen_geometry))
+        visible_title_bar = title_bar_rect.intersected(QRect(*screen_geometry))
         if (
-            visible.width() >= _MIN_VISIBLE_SIZE[0]
-            and visible.height() >= _MIN_VISIBLE_SIZE[1]
+            visible_title_bar.width() >= _MIN_VISIBLE_TITLE_BAR_SIZE[0]
+            and visible_title_bar.height() >= _MIN_VISIBLE_TITLE_BAR_SIZE[1]
         ):
             return True
     return False
