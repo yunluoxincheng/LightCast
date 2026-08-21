@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QIcon
 from qfluentwidgets import (
     FluentIcon as FIF,
@@ -32,6 +32,8 @@ WINDOW_GEOMETRY_VERSION_KEY = "window_geometry_v8"
 # 外框保存出的实际 geometry 约为 914×614。只迁移这一小段异常范围，避免
 # 再次无条件清除用户正常拖拽得到的较大自定义尺寸。
 _COLLAPSED_GEOMETRY_MAX = (930, 630)
+# 至少保留一块足以拖动/识别窗口的可见区域；仅剩几个像素不算可恢复。
+_MIN_VISIBLE_SIZE = (80, 48)
 
 
 def _parse_geometry(value: object) -> tuple[int, int, int, int] | None:
@@ -46,8 +48,27 @@ def _parse_geometry(value: object) -> tuple[int, int, int, int] | None:
     return x, y, width, height
 
 
-def _geometry_to_restore(config: Config) -> tuple[int, int, int, int] | None:
-    """返回可恢复几何，并一次性清理开机自启污染的最小尺寸。"""
+def _is_geometry_visible(
+    geometry: tuple[int, int, int, int],
+    available_geometries: list[tuple[int, int, int, int]],
+) -> bool:
+    """保存的窗口在任一屏幕工作区内至少保留一块可操作区域。"""
+    window_rect = QRect(*geometry)
+    for screen_geometry in available_geometries:
+        visible = window_rect.intersected(QRect(*screen_geometry))
+        if (
+            visible.width() >= _MIN_VISIBLE_SIZE[0]
+            and visible.height() >= _MIN_VISIBLE_SIZE[1]
+        ):
+            return True
+    return False
+
+
+def _geometry_to_restore(
+    config: Config,
+    available_geometries: list[tuple[int, int, int, int]] | None = None,
+) -> tuple[int, int, int, int] | None:
+    """返回可恢复几何，并清理已知污染或已离开所有屏幕的尺寸位置。"""
     geom = _parse_geometry(config.get("window_geometry"))
     if not config.get(WINDOW_GEOMETRY_VERSION_KEY, False):
         if (
@@ -58,7 +79,21 @@ def _geometry_to_restore(config: Config) -> tuple[int, int, int, int] | None:
             config.set("window_geometry", None, persist=False)
             geom = None
         config.set(WINDOW_GEOMETRY_VERSION_KEY, True)
+    if (
+        geom is not None
+        and available_geometries is not None
+        and not _is_geometry_visible(geom, available_geometries)
+    ):
+        config.set("window_geometry", None)
+        return None
     return geom
+
+
+def _available_screen_geometries() -> list[tuple[int, int, int, int]]:
+    """读取全部屏幕的可用工作区（排除任务栏等系统保留区域）。"""
+    from PySide6.QtWidgets import QApplication
+
+    return [screen.availableGeometry().getRect() for screen in QApplication.screens()]
 
 
 class _StartupGeometryGuard(QObject):
@@ -148,7 +183,7 @@ class MainWindow(MSFluentWindow):
         # 旧实现以 1500×1000 除缩放率，150% 下会变成 1000×666。
         self.resize(*DEFAULT_WINDOW_SIZE)
         self.setMinimumSize(900, 600)
-        geom = _geometry_to_restore(config)
+        geom = _geometry_to_restore(config, _available_screen_geometries())
         if geom is not None:
             self.setGeometry(*geom)
         self._startup_geometry_guard = _StartupGeometryGuard(self, geom)

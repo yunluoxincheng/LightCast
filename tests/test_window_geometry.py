@@ -10,6 +10,7 @@ from ydlna.ui.main_window import (
     DEFAULT_WINDOW_SIZE,
     WINDOW_GEOMETRY_VERSION_KEY,
     _geometry_to_restore,
+    _is_geometry_visible,
 )
 
 
@@ -69,6 +70,46 @@ def test_window_v8_restores_geometry_saved_after_migration() -> None:
     )
 
     assert _geometry_to_restore(config) == (20, 30, 1280, 850)  # type: ignore[arg-type]
+    assert config.set_calls == []
+
+
+def test_geometry_visibility_accepts_window_on_any_connected_screen() -> None:
+    screens = [(0, 0, 1920, 1040), (1920, -200, 2560, 1400)]
+
+    assert _is_geometry_visible((2100, 100, 1200, 800), screens) is True
+    assert _is_geometry_visible((-2000, 100, 1200, 800), screens) is False
+
+
+def test_geometry_visibility_rejects_unusable_edge_sliver() -> None:
+    screens = [(0, 0, 1920, 1040)]
+
+    assert _is_geometry_visible((1870, 100, 1200, 800), screens) is False
+    assert _is_geometry_visible((1840, 992, 1200, 800), screens) is True
+
+
+def test_geometry_restore_discards_position_left_on_disconnected_monitor() -> None:
+    config = _Config(
+        {
+            WINDOW_GEOMETRY_VERSION_KEY: True,
+            "window_geometry": [2200, 100, 1200, 800],
+        }
+    )
+
+    assert _geometry_to_restore(config, [(0, 0, 1920, 1040)]) is None  # type: ignore[arg-type]
+    assert config.data["window_geometry"] is None
+    assert config.set_calls == [("window_geometry", None, True)]
+
+
+def test_geometry_restore_keeps_position_on_secondary_monitor() -> None:
+    config = _Config(
+        {
+            WINDOW_GEOMETRY_VERSION_KEY: True,
+            "window_geometry": [2200, 100, 1200, 800],
+        }
+    )
+    screens = [(0, 0, 1920, 1040), (1920, 0, 2560, 1400)]
+
+    assert _geometry_to_restore(config, screens) == (2200, 100, 1200, 800)  # type: ignore[arg-type]
     assert config.set_calls == []
 
 
