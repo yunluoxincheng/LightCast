@@ -52,12 +52,14 @@ def _parse_geometry(value: object) -> tuple[int, int, int, int] | None:
 def _is_geometry_visible(
     geometry: tuple[int, int, int, int],
     available_geometries: list[tuple[int, int, int, int]],
+    title_bar_button_width: int,
 ) -> bool:
     """保存窗口的顶部拖动区域在任一屏幕工作区内仍可实际操作。"""
     x, y, width, _height = geometry
-    title_bar_rect = QRect(x, y, width, _TITLE_BAR_HEIGHT)
+    draggable_width = max(0, width - max(0, title_bar_button_width))
+    draggable_title_bar = QRect(x, y, draggable_width, _TITLE_BAR_HEIGHT)
     for screen_geometry in available_geometries:
-        visible_title_bar = title_bar_rect.intersected(QRect(*screen_geometry))
+        visible_title_bar = draggable_title_bar.intersected(QRect(*screen_geometry))
         if (
             visible_title_bar.width() >= _MIN_VISIBLE_TITLE_BAR_SIZE[0]
             and visible_title_bar.height() >= _MIN_VISIBLE_TITLE_BAR_SIZE[1]
@@ -69,6 +71,7 @@ def _is_geometry_visible(
 def _geometry_to_restore(
     config: Config,
     available_geometries: list[tuple[int, int, int, int]] | None = None,
+    title_bar_button_width: int = 0,
 ) -> tuple[int, int, int, int] | None:
     """返回可恢复几何，并清理已知污染或已离开所有屏幕的尺寸位置。"""
     geom = _parse_geometry(config.get("window_geometry"))
@@ -84,7 +87,11 @@ def _geometry_to_restore(
     if (
         geom is not None
         and available_geometries is not None
-        and not _is_geometry_visible(geom, available_geometries)
+        and not _is_geometry_visible(
+            geom,
+            available_geometries,
+            title_bar_button_width,
+        )
     ):
         config.set("window_geometry", None)
         return None
@@ -96,6 +103,19 @@ def _available_screen_geometries() -> list[tuple[int, int, int, int]]:
     from PySide6.QtWidgets import QApplication
 
     return [screen.availableGeometry().getRect() for screen in QApplication.screens()]
+
+
+def _visible_title_bar_button_width(title_bar: QWidget) -> int:
+    """返回窗口显示后会占用右侧拖动区的标题栏按钮总宽度。"""
+    from qframelesswindow import TitleBarButton
+
+    # MainWindow 构造期间父窗口尚未 show()，此时 isVisible() 恒为 False；
+    # isHidden() 能区分按钮自身是否被明确隐藏，与 TitleBarBase 显示后的语义一致。
+    return sum(
+        button.width()
+        for button in title_bar.findChildren(TitleBarButton)
+        if not button.isHidden()
+    )
 
 
 class _StartupGeometryGuard(QObject):
@@ -185,7 +205,11 @@ class MainWindow(MSFluentWindow):
         # 旧实现以 1500×1000 除缩放率，150% 下会变成 1000×666。
         self.resize(*DEFAULT_WINDOW_SIZE)
         self.setMinimumSize(900, 600)
-        geom = _geometry_to_restore(config, _available_screen_geometries())
+        geom = _geometry_to_restore(
+            config,
+            _available_screen_geometries(),
+            _visible_title_bar_button_width(self.titleBar),
+        )
         if geom is not None:
             self.setGeometry(*geom)
         self._startup_geometry_guard = _StartupGeometryGuard(self, geom)
