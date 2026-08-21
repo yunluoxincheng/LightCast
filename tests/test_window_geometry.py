@@ -10,6 +10,7 @@ from ydlna.ui.main_window import (
     DEFAULT_WINDOW_SIZE,
     WINDOW_GEOMETRY_VERSION_KEY,
     _geometry_to_restore,
+    _is_geometry_visible,
 )
 
 
@@ -69,6 +70,61 @@ def test_window_v8_restores_geometry_saved_after_migration() -> None:
     )
 
     assert _geometry_to_restore(config) == (20, 30, 1280, 850)  # type: ignore[arg-type]
+    assert config.set_calls == []
+
+
+def test_geometry_visibility_accepts_window_on_any_connected_screen() -> None:
+    screens = [(0, 0, 1920, 1040), (1920, -200, 2560, 1400)]
+
+    assert _is_geometry_visible((2100, 100, 1200, 800), screens, 138) is True
+    assert _is_geometry_visible((-2000, 100, 1200, 800), screens, 138) is False
+
+
+def test_geometry_visibility_accepts_visible_top_left_title_bar_area() -> None:
+    screens = [(0, 0, 1920, 1040)]
+
+    assert _is_geometry_visible((1840, 992, 1200, 800), screens, 138) is True
+
+
+def test_geometry_visibility_rejects_bottom_right_sliver_without_title_bar() -> None:
+    screens = [(0, 0, 1920, 1040)]
+
+    # 整个窗口仍有 80×48 可见，但露出的是右下角，顶部拖动区完全离屏。
+    assert _is_geometry_visible((-1120, -752, 1200, 800), screens, 138) is False
+    # 右侧只剩 50px 标题栏也不足以可靠拖回。
+    assert _is_geometry_visible((1870, 100, 1200, 800), screens, 138) is False
+
+
+def test_geometry_visibility_rejects_right_side_title_bar_buttons_only() -> None:
+    screens = [(0, 0, 1920, 1040)]
+
+    # 屏幕中只剩窗口最右侧 80px；它完全位于 3×46px 控制按钮区内。
+    assert _is_geometry_visible((-1120, 100, 1200, 800), screens, 138) is False
+
+
+def test_geometry_restore_discards_position_left_on_disconnected_monitor() -> None:
+    config = _Config(
+        {
+            WINDOW_GEOMETRY_VERSION_KEY: True,
+            "window_geometry": [2200, 100, 1200, 800],
+        }
+    )
+
+    assert _geometry_to_restore(config, [(0, 0, 1920, 1040)], 138) is None  # type: ignore[arg-type]
+    assert config.data["window_geometry"] is None
+    assert config.set_calls == [("window_geometry", None, True)]
+
+
+def test_geometry_restore_keeps_position_on_secondary_monitor() -> None:
+    config = _Config(
+        {
+            WINDOW_GEOMETRY_VERSION_KEY: True,
+            "window_geometry": [2200, 100, 1200, 800],
+        }
+    )
+    screens = [(0, 0, 1920, 1040), (1920, 0, 2560, 1400)]
+
+    assert _geometry_to_restore(config, screens, 138) == (2200, 100, 1200, 800)  # type: ignore[arg-type]
     assert config.set_calls == []
 
 
