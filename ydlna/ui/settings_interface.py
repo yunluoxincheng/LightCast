@@ -151,6 +151,18 @@ class SettingsInterface(QWidget):
         self.intranetCastSwitch = SwitchButton()
         self.intranetCastCard.setWidget(self.intranetCastSwitch)
 
+        # 投屏确认：首次来自新来源设备的投屏需要本机确认
+        self.castConfirmCard = _SettingCard(
+            tr("settings.cast_confirm"), tr("settings.cast_confirm.hint"))
+        self.castConfirmSwitch = SwitchButton()
+        self.castConfirmCard.setWidget(self.castConfirmSwitch)
+
+        # 仅默认网卡：收窄多网卡 / 热点环境下的暴露面（重启投屏服务后生效）
+        self.defaultNicOnlyCard = _SettingCard(
+            tr("settings.default_nic_only"), tr("settings.default_nic_only.hint"))
+        self.defaultNicOnlySwitch = SwitchButton()
+        self.defaultNicOnlyCard.setWidget(self.defaultNicOnlySwitch)
+
         # ---- 关于 ----
         self.aboutTitle = SubtitleLabel(tr("settings.group.about"))
         self.aboutCard = CardWidget(self)
@@ -197,6 +209,8 @@ class SettingsInterface(QWidget):
         root.addWidget(self.deviceNameCard)
         root.addWidget(self.portCard)
         root.addWidget(self.intranetCastCard)
+        root.addWidget(self.castConfirmCard)
+        root.addWidget(self.defaultNicOnlyCard)
         root.addSpacing(8)
         root.addWidget(self.aboutTitle)
         root.addWidget(self.aboutCard)
@@ -223,6 +237,9 @@ class SettingsInterface(QWidget):
         self.deviceNameEdit.setText(self._config.get("friendly_name", ""))
         self.portEdit.setText(str(self._config.get("http_port", 0)))
         self.intranetCastSwitch.setChecked(bool(self._config.get("allow_intranet_cast", True)))
+        self.castConfirmSwitch.setChecked(bool(self._config.get("require_cast_confirm", True)))
+        self.defaultNicOnlySwitch.setChecked(
+            bool(self._config.get("bind_default_interface_only", False)))
 
     def _reload_audio_devices(self) -> None:
         """重新填充音频输出设备下拉（保留当前选择）。"""
@@ -250,6 +267,8 @@ class SettingsInterface(QWidget):
         self.deviceNameEdit.textChanged.connect(self._on_device_name_changed)
         self.portEdit.textChanged.connect(self._on_port_changed)
         self.intranetCastSwitch.checkedChanged.connect(self._on_intranet_cast_changed)
+        self.castConfirmSwitch.checkedChanged.connect(self._on_cast_confirm_changed)
+        self.defaultNicOnlySwitch.checkedChanged.connect(self._on_default_nic_only_changed)
         self.githubButton.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_URL)))
 
     # ------------------------------------------------------------------ #
@@ -365,6 +384,14 @@ class SettingsInterface(QWidget):
         """投屏 SSRF 防护开关（是否允许指向内网的投屏 URL）。"""
         self._config.set("allow_intranet_cast", checked)
 
+    def _on_cast_confirm_changed(self, checked: bool) -> None:
+        """投屏确认开关：首次来自新来源设备的投屏是否需要本机确认。"""
+        self._config.set("require_cast_confirm", checked)
+
+    def _on_default_nic_only_changed(self, checked: bool) -> None:
+        """仅默认网卡开关：收窄监听与宣告范围（重启投屏服务后生效）。"""
+        self._config.set("bind_default_interface_only", checked)
+
     def showEvent(self, event) -> None:  # noqa: N802, ANN001
         super().showEvent(event)
         # 进入设置页时刷新音频设备列表（设备插拔可能变化）
@@ -399,6 +426,10 @@ class SettingsInterface(QWidget):
         self.portCard.descLabel.setText(tr("settings.http_port.hint"))
         self.intranetCastCard.titleLabel.setText(tr("settings.allow_intranet_cast"))
         self.intranetCastCard.descLabel.setText(tr("settings.allow_intranet_cast.hint"))
+        self.castConfirmCard.titleLabel.setText(tr("settings.cast_confirm"))
+        self.castConfirmCard.descLabel.setText(tr("settings.cast_confirm.hint"))
+        self.defaultNicOnlyCard.titleLabel.setText(tr("settings.default_nic_only"))
+        self.defaultNicOnlyCard.descLabel.setText(tr("settings.default_nic_only.hint"))
         self.aboutTitle.setText(tr("settings.group.about"))
         self.aboutDesc.setText(tr("settings.about.description"))
         self.aboutLicense.setText(tr("settings.about.license"))

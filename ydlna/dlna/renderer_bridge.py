@@ -15,12 +15,14 @@ import asyncio
 import re
 from typing import TYPE_CHECKING, Optional
 
+from async_upnp_client.exceptions import UpnpActionError
 from defusedxml import ElementTree as ET  # 安全 XML 解析
 
 from ..async_tasks import BackgroundTasks
 from ..logger import get_logger
 from ..player._url_guard import UrlBlockedError, validate_upstream_url
 from ..player.mpv_player import Player
+from ._control_context import current_controller_ip
 
 if TYPE_CHECKING:
     from .avtransport import AVTransportService
@@ -153,6 +155,14 @@ class RendererBridge:
         # 投屏到达（SetAVTransportURI）回调：由 app 注入，用于立即切页 + 缓冲动画
         # （不等代理/解码，用户体感秒进播放器页）
         self.on_cast_started = None  # Callable[[], None] | None
+        # 投屏确认门控：由 app 注入 async (controller_ip, url, title) -> bool，
+        # 弹窗询问用户。返回 True 放行并授权该控制点，False 拒绝。
+        # 未注入（装配缺失）时按 fail-closed 拒绝。
+        self.cast_gate = None  # Callable[[str, str, str], Awaitable[bool]] | None
+        # 本次运行内已授权的控制点（真实 SOAP peer IP，由 server 层补丁登记）。
+        # 授权后该控制点的全部状态变更 action（SetURI/Play/Pause/Stop/Seek/
+        # Volume/Mute）都放行；未授权控制点一律拒绝。
+        self._confirmed_controllers: set[str] = set()
         # 当前活跃的媒体代理（换媒体时先停旧的）
         self._hls_proxy = None
         self._direct_proxy = None
@@ -244,9 +254,8 @@ class RendererBridge:
         ):
             self._write_state_variable(avt, name, value)
         self._write_state_variable(rc, "Volume", self._player.get_volume())
-        self._write_state_variable(
-            rc, "Mute", "1" if self._player.is_muted() else "0"
-        )
+        # Mute 状态变量是 boolean 类型，必须写真实 bool（写 "1"/"0" 会被库拒绝）
+        self._write_state_variable(rc, "Mute", self._player.is_muted())
 
         self._last_position = position
         self._last_duration = duration
@@ -279,14 +288,12 @@ class RendererBridge:
         """
         title = parse_title_from_didl(meta) or url
         log.info("桥接: 设置媒体 title=%r url=%s", title, url)
-        # URI/meta 先作为本次事务的候选值写给 service；只有代理初始化且
-        # Player.play() 成功返回后才提交到 Bridge。失败则恢复上一份已提交身份。
-        self._begin_transport_attempt(url, meta)
 
-        # 第一道：scheme 白名单
+        # 第一道：scheme 白名单。所有拒绝都发生在写入任何 evented 状态之前，
+        # 候选 URI 不会短暂暴露给 GENA 订阅者。
         if not url.lower().startswith(("http://", "https://")):
             log.warning("拒绝非 http(s) 投屏 URL（可能尝试读取本地文件）: %s", url)
-            self._fail_transport_attempt()
+            self._set_transport_status("ERROR_OCCURRED")
             return
 
         # 第二道：入口安全校验。被拦（UrlBlockedError）→ 直接 ERROR，绝不 fallback。
@@ -296,8 +303,28 @@ class RendererBridge:
             validate_upstream_url(url, allow_intranet=allow_intranet)
         except UrlBlockedError as e:
             log.warning("投屏 URL 被安全策略拦截: %s（%s）", url, e.reason)
-            self._fail_transport_attempt()
+            self._set_transport_status("ERROR_OCCURRED")
             return
+
+        # 第三道：控制点授权 + 投屏确认。授权是第一道状态变更门槛——通过之前
+        # 不发布候选 URI / TransportState（service 的 AVTransportURI 等都是
+        # evented 变量，先写再确认会让订阅者看到未批准的媒体）。被拒绝的投屏
+        # 不切页、不显示缓冲动画，并以 SOAP fault 拒绝本次 action，控制点
+        # 不会误以为投屏已被接受。
+        controller = current_controller_ip()
+        if not await self._confirm_cast(controller, url, title):
+            log.info(
+                "投屏请求未获本机确认，已拒绝: controller=%s title=%r",
+                controller, title,
+            )
+            self._set_transport_status("ERROR_OCCURRED")
+            raise UpnpActionError(
+                error_desc="控制点未获授权", message="controller not authorized"
+            )
+
+        # 授权通过后才发布候选请求状态（evented）；只有代理初始化且
+        # Player.play() 成功返回后才提交到 Bridge。失败则恢复上一份已提交身份。
+        self._begin_transport_attempt(url, meta)
 
         # 先通知 UI「投屏到达」：立即切到播放器页并显示缓冲动画，
         # 代理/解码在后台进行（用户体感秒进）
@@ -372,6 +399,69 @@ class RendererBridge:
         except Exception:  # noqa: BLE001
             return True
 
+    def _require_cast_confirm(self) -> bool:
+        """读取「投屏需本机确认」配置（默认 True）。"""
+        try:
+            from ..config import Config
+
+            return bool(Config.instance().get("require_cast_confirm", True))
+        except Exception:  # noqa: BLE001
+            return True
+
+    async def _confirm_cast(
+        self, controller: Optional[str], url: str, title: str
+    ) -> bool:
+        """控制点授权 + 投屏确认门控（H7）。
+
+        - 配置关闭（require_cast_confirm=False）→ 用户显式选择无鉴权模式，
+          全部放行；
+        - 拿不到控制点 IP（server 层上下文缺失）→ fail-closed 拒绝；
+        - 控制点已授权 → 放行；
+        - 首次出现的新控制点 → await 注入的确认协程（app 注入的弹窗），
+          同意则授权该控制点，拒绝（或协程异常）则拒绝。
+
+        门控协程异常按拒绝处理：确认是安全增强，出问题时宁可拒绝也不能
+        退回到「无鉴权直接播放」。
+        """
+        if not self._require_cast_confirm():
+            return True
+        if controller is None:
+            log.error("无法确定控制点 IP（SOAP 上下文缺失），拒绝投屏")
+            return False
+        if controller in self._confirmed_controllers:
+            return True
+        gate = self.cast_gate
+        if gate is None:
+            log.error("投屏确认门控未注入（应用装配错误），拒绝投屏")
+            return False
+        try:
+            allowed = bool(await gate(controller, url, title))
+        except Exception as e:  # noqa: BLE001
+            log.warning("投屏确认门控异常，按拒绝处理: %s", e)
+            return False
+        if allowed:
+            self._confirmed_controllers.add(controller)
+        return allowed
+
+    def ensure_authorized_controller(self, action: str) -> None:
+        """控制点授权检查（service 写 action 在任何状态变更前调用）。
+
+        状态变更类 action 只允许已授权控制点；未授权直接 SOAP fault。
+        覆盖 SetURI/Play/Pause/Stop/Seek/SetVolume/SetMute/SetNextURI——
+        否则攻击者即使从未通过投屏确认，也能暂停/停止播放、任意 Seek、
+        把音量调满或静音、篡改队列中的下一个媒体。require_cast_confirm
+        关闭（无鉴权模式）时不检查。
+        """
+        if not self._require_cast_confirm():
+            return
+        controller = current_controller_ip()
+        if controller is not None and controller in self._confirmed_controllers:
+            return
+        log.warning("拒绝未授权控制点的 %s 请求: controller=%s", action, controller)
+        raise UpnpActionError(
+            error_desc=f"控制点未获授权: {controller}", message="controller not authorized"
+        )
+
     async def _setup_proxy_candidate(
         self, url: str, *, allow_intranet: bool
     ) -> Optional[tuple[str, object]]:
@@ -420,17 +510,20 @@ class RendererBridge:
                     setattr(self, attr, None)
 
     def on_play(self) -> None:
+        self.ensure_authorized_controller("Play")
         log.info("桥接: 播放")
         self._player.set_paused(False)
         self._set_transport_state("PLAYING")
         self._start_polling()
 
     def on_pause(self) -> None:
+        self.ensure_authorized_controller("Pause")
         log.info("桥接: 暂停")
         self._player.set_paused(True)
         self._set_transport_state("PAUSED_PLAYBACK")
 
     def on_stop(self) -> None:
+        self.ensure_authorized_controller("Stop")
         log.info("桥接: 停止")
         self._player.stop()
         self._set_transport_state("STOPPED")
@@ -442,6 +535,7 @@ class RendererBridge:
 
     def on_seek(self, unit: str, target: str) -> None:
         """unit ∈ {ABS_TIME, REL_TIME, ABS_COUNT, REL_COUNT, TRACK_NR}。"""
+        self.ensure_authorized_controller("Seek")
         if unit in ("REL_TIME", "ABS_TIME"):
             seconds = dlna_time_to_seconds(target)
             if seconds is not None:
@@ -451,9 +545,11 @@ class RendererBridge:
             log.warning("不支持的 seek 类型: %s", unit)
 
     def on_set_volume(self, volume: int) -> None:
+        self.ensure_authorized_controller("SetVolume")
         self._player.set_volume(volume)
 
     def on_set_mute(self, muted: bool) -> None:
+        self.ensure_authorized_controller("SetMute")
         self._player.set_mute(muted)
 
     # ------------------------------------------------------------------ #
@@ -474,9 +570,8 @@ class RendererBridge:
 
     def _on_player_mute(self, muted: bool) -> None:
         if self._rc is not None:
-            self._write_state_variable(
-                self._rc, "Mute", "1" if muted else "0"
-            )
+            # Mute 状态变量是 boolean 类型，必须写真实 bool
+            self._write_state_variable(self._rc, "Mute", muted)
 
     def _set_transport_state(self, dlna_state: str) -> None:
         if dlna_state not in _TRANSPORT_STATES:

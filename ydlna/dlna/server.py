@@ -23,10 +23,12 @@ import sys
 from typing import Optional
 
 from async_upnp_client.server import UpnpServer
+import async_upnp_client.server as _upnp_server_module
 
 from ..config import Config
 from ..constants import APP_NAME, APP_VERSION, DEFAULT_SSDP_PORT
 from ..logger import get_logger
+from ._control_context import reset_controller_ip, set_controller_ip
 from ._net import get_local_ip
 from .avtransport import AVTransportService
 from .connection_manager import ConnectionManagerService
@@ -41,10 +43,17 @@ log = get_logger("dlna.server")
 _UPNP_PATCHED = False
 
 
-def _patch_upnp_server_skip_ssdp() -> None:
-    """让 UpnpServer.async_start 只启动 HTTP server，不启动它自带的 SSDP。
+def _patch_upnp_server() -> None:
+    """对 async_upnp_client 库做两处全局补丁（只打一次）：
 
-    SSDP 由我们的 SsdpListener 线程接管（在 Windows 的 IOCP 下更可靠）。
+    1. ``UpnpServer.async_start`` 只启动 HTTP server，不启动它自带的 SSDP。
+       SSDP 由我们的 SsdpListener 线程接管（在 Windows 的 IOCP 下更可靠）。
+    2. 包装模块级 ``action_handler``：SOAOP 控制请求入口用 ``request.remote``
+       把真实控制点 IP 登记到 ContextVar，供 Bridge 做「控制点授权」
+       （H7：Play/Pause/Stop/Seek/音量等状态变更 action 需要区分来源）。
+       aiohttp 每个请求是独立任务，ContextVar 按任务复制，天然隔离并发。
+       注意：`_async_start_http_server` 里 ``partial(action_handler, ...)``
+       是运行时模块全局查找，本补丁必须在 async_start 之前生效。
     """
     global _UPNP_PATCHED
     if _UPNP_PATCHED:
@@ -78,6 +87,26 @@ def _patch_upnp_server_skip_ssdp() -> None:
     UpnpServer.async_start = _async_start_no_ssdp
     log.debug("已 patch UpnpServer.async_start（跳过自带 SSDP，base_uri 用 %s）", get_local_ip())
 
+    _orig_action_handler = getattr(_upnp_server_module, "action_handler", None)
+    if _orig_action_handler is None:
+        # 库升级改变了内部结构：控制点 IP 拿不到，授权将 fail-closed，
+        # 所有状态变更 action 都会被拒绝——必须在这里就大声报错。
+        log.error(
+            "async_upnp_client.server.action_handler 不存在（库结构已变化），"
+            "控制点授权上下文不可用；请检查库版本兼容性"
+        )
+        return
+
+    async def _action_handler_with_context(service, request):  # noqa: ANN001, ANN202
+        token = set_controller_ip(request.remote)
+        try:
+            return await _orig_action_handler(service, request)
+        finally:
+            reset_controller_ip(token)
+
+    _upnp_server_module.action_handler = _action_handler_with_context
+    log.debug("已 patch action_handler（登记控制点 IP 上下文）")
+
 
 class DlnaServer:
     """DLNA MediaRenderer 服务封装（HTTP + 自研 SSDP）。"""
@@ -103,16 +132,25 @@ class DlnaServer:
         if self._running:
             return
 
-        # 让 UpnpServer 只跑 HTTP，SSDP 由我们的线程接管
-        _patch_upnp_server_skip_ssdp()
+        # 库补丁（跳过自带 SSDP + 控制点 IP 上下文）
+        _patch_upnp_server()
 
         friendly_name = self._config.get("friendly_name", "轻投")
         udn = self._config.get("udn")
         http_port = int(self._config.get("http_port", 0))
 
         device_cls = make_device_class(friendly_name, udn)
-        # source 用 0.0.0.0（HTTP server 会绑所有接口）；base_uri 在 patch 里改真实 IP
-        source = ("0.0.0.0", DEFAULT_SSDP_PORT)
+        # source 决定 HTTP/SOAP 的监听地址：默认 0.0.0.0 绑全部网卡（兼容行为）；
+        # 「仅默认网卡」开启时只绑 get_local_ip() 所在网卡，SSDP 宣告白名单同步
+        # 收窄，多网卡 / 虚拟网卡 / 热点环境下设备不再向其他网卡暴露。base_uri
+        # patch 本来就用 get_local_ip() 拼 LOCATION，两种模式下地址都一致。
+        ssdp_allowed_ips: Optional[list[str]] = None
+        bind_host = "0.0.0.0"
+        if bool(self._config.get("bind_default_interface_only", False)):
+            bind_host = get_local_ip()
+            ssdp_allowed_ips = [bind_host]
+            log.info("仅通过默认网卡提供投屏服务: %s", bind_host)
+        source = (bind_host, DEFAULT_SSDP_PORT)
         log.info("启动 DLNA 服务: name=%r udn=%s http_port=%s", friendly_name, udn, http_port)
         self._server = UpnpServer(
             server_device=device_cls,
@@ -127,9 +165,15 @@ class DlnaServer:
         rc = _find_service(device, RenderingControlService)
         cm = _find_service(device, ConnectionManagerService)
         if avt is None or rc is None or cm is None:
-            log.error("无法从设备实例获取 service（avt=%s rc=%s cm=%s）", avt, rc, cm)
-        else:
-            self._bridge.set_services(avt, rc, cm)
+            # 缺 service 时继续提供服务会进入「安全组件未装配但 SOAP 写接口
+            # 仍开放」的半失效状态（各 service 已 fail-closed，这里再让启动
+            # 干脆失败，避免用户误以为投屏服务正常）。
+            log.error(
+                "无法从设备实例获取 service（avt=%s rc=%s cm=%s），启动失败",
+                avt, rc, cm,
+            )
+            raise RuntimeError("无法从设备实例获取 DLNA service，DLNA 服务启动失败")
+        self._bridge.set_services(avt, rc, cm)
 
         # 读取实际 HTTP 端口（http_port=0 时由系统分配）
         self._http_port = _resolve_http_port(self._server)
@@ -144,6 +188,7 @@ class DlnaServer:
             http_port=self._http_port,
             server_id=server_id,
             location_path="/device.xml",
+            allowed_ips=ssdp_allowed_ips,
         )
         self._ssdp.start()
         # Thread.start() 只表示线程已调度，不代表 bind/join multicast 成功。
