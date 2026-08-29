@@ -14,14 +14,15 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import TYPE_CHECKING, Optional
-from urllib.parse import urlsplit
 
+from async_upnp_client.exceptions import UpnpActionError
 from defusedxml import ElementTree as ET  # 安全 XML 解析
 
 from ..async_tasks import BackgroundTasks
 from ..logger import get_logger
 from ..player._url_guard import UrlBlockedError, validate_upstream_url
 from ..player.mpv_player import Player
+from ._control_context import current_controller_ip
 
 if TYPE_CHECKING:
     from .avtransport import AVTransportService
@@ -125,29 +126,6 @@ def url_is_image(url: str) -> bool:
     return path.endswith(_IMAGE_EXTS)
 
 
-def url_source_host(url: str) -> str:
-    """从投屏 URL 提取小写 host[:port]，作为来源设备的会话记忆键。
-
-    SOAP 请求里拿不到控制点的 IP，来源主机是「同一台设备」最接近的近似
-    （每台设备的媒体都由它自己的地址提供）。剥掉 userinfo，避免把可能
-    出现在 URL 里的凭据用作记忆键或展示内容。
-    """
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname or ""
-        if not host:
-            return url
-        port = parts.port
-    except ValueError:
-        return url
-    if port is None:
-        return host
-    # IPv6 字面量按 URL 惯例加方括号，端口不至于和地址混淆
-    if ":" in host:
-        return f"[{host}]:{port}"
-    return f"{host}:{port}"
-
-
 class RendererBridge:
     """DLNA 协议层 ↔ 播放器层的桥接器。
 
@@ -177,12 +155,14 @@ class RendererBridge:
         # 投屏到达（SetAVTransportURI）回调：由 app 注入，用于立即切页 + 缓冲动画
         # （不等代理/解码，用户体感秒进播放器页）
         self.on_cast_started = None  # Callable[[], None] | None
-        # 投屏确认门控：由 app 注入 async (url, title) -> bool，弹窗询问用户。
-        # 返回 True 放行，False 拒绝。未注入（测试 / 无 UI 降级）时直接放行。
-        self.cast_gate = None  # Callable[[str, str], Awaitable[bool]] | None
-        # 本次运行内已确认的投屏来源主机（url_source_host），确认过一次后
-        # 同来源的后续投屏不再弹窗。
-        self._confirmed_hosts: set[str] = set()
+        # 投屏确认门控：由 app 注入 async (controller_ip, url, title) -> bool，
+        # 弹窗询问用户。返回 True 放行并授权该控制点，False 拒绝。
+        # 未注入（装配缺失）时按 fail-closed 拒绝。
+        self.cast_gate = None  # Callable[[str, str, str], Awaitable[bool]] | None
+        # 本次运行内已授权的控制点（真实 SOAP peer IP，由 server 层补丁登记）。
+        # 授权后该控制点的全部状态变更 action（SetURI/Play/Pause/Stop/Seek/
+        # Volume/Mute）都放行；未授权控制点一律拒绝。
+        self._confirmed_controllers: set[str] = set()
         # 当前活跃的媒体代理（换媒体时先停旧的）
         self._hls_proxy = None
         self._direct_proxy = None
@@ -329,10 +309,14 @@ class RendererBridge:
             self._fail_transport_attempt()
             return
 
-        # 第三道（产品层）：投屏确认门控。同样在 cb() 之前——被用户拒绝的投屏
-        # 不切页、不显示缓冲动画；复用 _fail_transport_attempt 恢复上一份媒体身份。
-        if not await self._confirm_cast(url, title):
-            log.info("投屏请求未获本机确认，已拒绝: title=%r url=%s", title, url)
+        # 第三道（产品层）：控制点授权 + 投屏确认。同样在 cb() 之前——被拒绝的
+        # 投屏不切页、不显示缓冲动画；复用 _fail_transport_attempt 恢复上一份身份。
+        controller = current_controller_ip()
+        if not await self._confirm_cast(controller, url, title):
+            log.info(
+                "投屏请求未获本机确认，已拒绝: controller=%s title=%r",
+                controller, title,
+            )
             self._fail_transport_attempt()
             return
 
@@ -418,33 +402,57 @@ class RendererBridge:
         except Exception:  # noqa: BLE001
             return True
 
-    async def _confirm_cast(self, url: str, title: str) -> bool:
-        """投屏确认门控：首次来自新来源主机的投屏需要本机确认。
+    async def _confirm_cast(
+        self, controller: Optional[str], url: str, title: str
+    ) -> bool:
+        """控制点授权 + 投屏确认门控（H7）。
 
-        - 配置关闭（require_cast_confirm=False）→ 直接放行；
-        - 同来源主机本次运行内确认过 → 直接放行；
-        - 其余情况 await 注入的确认协程（app 注入的弹窗），同意则把来源主机
-          记入会话集合，拒绝（或协程异常）则拒绝。
+        - 配置关闭（require_cast_confirm=False）→ 用户显式选择无鉴权模式，
+          全部放行；
+        - 拿不到控制点 IP（server 层上下文缺失）→ fail-closed 拒绝；
+        - 控制点已授权 → 放行；
+        - 首次出现的新控制点 → await 注入的确认协程（app 注入的弹窗），
+          同意则授权该控制点，拒绝（或协程异常）则拒绝。
 
         门控协程异常按拒绝处理：确认是安全增强，出问题时宁可拒绝也不能
         退回到「无鉴权直接播放」。
         """
         if not self._require_cast_confirm():
             return True
-        host = url_source_host(url)
-        if host in self._confirmed_hosts:
+        if controller is None:
+            log.error("无法确定控制点 IP（SOAP 上下文缺失），拒绝投屏")
+            return False
+        if controller in self._confirmed_controllers:
             return True
         gate = self.cast_gate
         if gate is None:
-            return True
+            log.error("投屏确认门控未注入（应用装配错误），拒绝投屏")
+            return False
         try:
-            allowed = bool(await gate(url, title))
+            allowed = bool(await gate(controller, url, title))
         except Exception as e:  # noqa: BLE001
             log.warning("投屏确认门控异常，按拒绝处理: %s", e)
             return False
         if allowed:
-            self._confirmed_hosts.add(host)
+            self._confirmed_controllers.add(controller)
         return allowed
+
+    def _ensure_authorized_controller(self, action: str) -> None:
+        """状态变更类 action 只允许已授权控制点；未授权直接 SOAP fault。
+
+        覆盖 Play/Pause/Stop/Seek/SetVolume/SetMute——否则攻击者即使从未
+        通过投屏确认，也能暂停/停止播放、任意 Seek、把音量调满或静音。
+        require_cast_confirm 关闭（无鉴权模式）时不检查。
+        """
+        if not self._require_cast_confirm():
+            return
+        controller = current_controller_ip()
+        if controller is not None and controller in self._confirmed_controllers:
+            return
+        log.warning("拒绝未授权控制点的 %s 请求: controller=%s", action, controller)
+        raise UpnpActionError(
+            error_desc=f"控制点未获授权: {controller}", message="controller not authorized"
+        )
 
     async def _setup_proxy_candidate(
         self, url: str, *, allow_intranet: bool
@@ -494,17 +502,20 @@ class RendererBridge:
                     setattr(self, attr, None)
 
     def on_play(self) -> None:
+        self._ensure_authorized_controller("Play")
         log.info("桥接: 播放")
         self._player.set_paused(False)
         self._set_transport_state("PLAYING")
         self._start_polling()
 
     def on_pause(self) -> None:
+        self._ensure_authorized_controller("Pause")
         log.info("桥接: 暂停")
         self._player.set_paused(True)
         self._set_transport_state("PAUSED_PLAYBACK")
 
     def on_stop(self) -> None:
+        self._ensure_authorized_controller("Stop")
         log.info("桥接: 停止")
         self._player.stop()
         self._set_transport_state("STOPPED")
@@ -516,6 +527,7 @@ class RendererBridge:
 
     def on_seek(self, unit: str, target: str) -> None:
         """unit ∈ {ABS_TIME, REL_TIME, ABS_COUNT, REL_COUNT, TRACK_NR}。"""
+        self._ensure_authorized_controller("Seek")
         if unit in ("REL_TIME", "ABS_TIME"):
             seconds = dlna_time_to_seconds(target)
             if seconds is not None:
@@ -525,9 +537,11 @@ class RendererBridge:
             log.warning("不支持的 seek 类型: %s", unit)
 
     def on_set_volume(self, volume: int) -> None:
+        self._ensure_authorized_controller("SetVolume")
         self._player.set_volume(volume)
 
     def on_set_mute(self, muted: bool) -> None:
+        self._ensure_authorized_controller("SetMute")
         self._player.set_mute(muted)
 
     # ------------------------------------------------------------------ #

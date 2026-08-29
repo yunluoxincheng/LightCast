@@ -275,6 +275,13 @@ class SsdpListener(threading.Thread):
         st_req = headers.get("st", "")
         if not st_req:
             return
+        # 仅默认网卡模式下，直接忽略白名单子网之外的 M-SEARCH：
+        # 不回复、不暴露设备存在（LOCATION 即便发出去也不可达）。
+        if self._allowed_ips is not None and not any(
+            same_subnet(ip, host, mask) for ip, mask in self._ips
+        ):
+            log.debug("忽略白名单子网外的 M-SEARCH from %s:%s, ST=%s", host, port, st_req)
+            return
         log.info("收到 M-SEARCH from %s:%s, ST=%s", host, port, st_req)
 
         # 选和请求方同子网的网卡 IP 填 LOCATION

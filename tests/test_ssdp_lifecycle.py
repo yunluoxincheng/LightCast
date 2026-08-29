@@ -221,7 +221,7 @@ def test_dlna_start_waits_for_ssdp_readiness_and_propagates_failure(
         def stop(self) -> None:
             self.stopped = True
 
-    monkeypatch.setattr(server_module, "_patch_upnp_server_skip_ssdp", lambda: None)
+    monkeypatch.setattr(server_module, "_patch_upnp_server", lambda: None)
     monkeypatch.setattr(server_module, "make_device_class", lambda *_args: object)
     monkeypatch.setattr(server_module, "UpnpServer", UpnpServer)
     monkeypatch.setattr(server_module, "SsdpListener", FailingListener)
@@ -294,7 +294,7 @@ def test_dlna_start_ssdp_wait_does_not_block_event_loop(monkeypatch) -> None:
         def stop(self) -> None:
             pass
 
-    monkeypatch.setattr(server_module, "_patch_upnp_server_skip_ssdp", lambda: None)
+    monkeypatch.setattr(server_module, "_patch_upnp_server", lambda: None)
     monkeypatch.setattr(server_module, "make_device_class", lambda *_args: object)
     monkeypatch.setattr(server_module, "UpnpServer", UpnpServer)
     monkeypatch.setattr(server_module, "SsdpListener", SlowListener)
@@ -434,6 +434,53 @@ def test_msearch_iface_choice_stays_within_whitelist() -> None:
     assert listener._choose_iface_for("10.9.9.9") == "192.168.1.10"
 
 
+def test_msearch_from_outside_whitelist_is_ignored() -> None:
+    """仅默认网卡模式下，白名单子网外的 M-SEARCH 不回复、不暴露设备。"""
+    listener = SsdpListener(
+        udn="uuid:test-device",
+        http_port=12345,
+        server_id="Test/1.0 UPnP/1.1 LightCast/test",
+        allowed_ips=["192.168.1.10"],
+    )
+    listener._ips = [("192.168.1.10", "255.255.255.0")]  # noqa: SLF001
+
+    sent: list[tuple[bytes, tuple]] = []
+
+    class FakeSock:
+        def sendto(self, data: bytes, addr: tuple) -> None:  # noqa: ANN001
+            sent.append((data, addr))
+
+    listener._sock = FakeSock()  # type: ignore[assignment]  # noqa: SLF001
+
+    headers = {"st": "upnp:rootdevice"}
+    listener._reply_msearch(headers, ("10.9.9.9", 1900), b"M-SEARCH * HTTP/1.1")
+    assert sent == []
+
+    listener._reply_msearch(headers, ("192.168.1.77", 1900), b"M-SEARCH * HTTP/1.1")
+    assert len(sent) == 1
+    assert b"LOCATION: http://192.168.1.10:12345/device.xml" in sent[0][0]
+
+
+def test_msearch_reply_unrestricted_without_whitelist() -> None:
+    listener = _listener()
+    listener._ips = [  # noqa: SLF001
+        ("192.168.1.10", "255.255.255.0"),
+        ("10.8.0.2", "255.255.255.0"),
+    ]
+
+    sent: list[tuple[bytes, tuple]] = []
+
+    class FakeSock:
+        def sendto(self, data: bytes, addr: tuple) -> None:  # noqa: ANN001
+            sent.append((data, addr))
+
+    listener._sock = FakeSock()  # type: ignore[assignment]  # noqa: SLF001
+
+    listener._reply_msearch({"st": "upnp:rootdevice"}, ("10.8.0.99", 1900), b"")
+    assert len(sent) == 1
+    assert b"LOCATION: http://10.8.0.2:12345/device.xml" in sent[0][0]
+
+
 def test_dlna_start_bind_scope_follows_config(monkeypatch) -> None:
     """「仅默认网卡」开关决定 HTTP 绑定地址与 SSDP 宣告白名单。"""
     captured: dict[str, object] = {}
@@ -481,7 +528,7 @@ def test_dlna_start_bind_scope_follows_config(monkeypatch) -> None:
         def stop(self) -> None:
             pass
 
-    monkeypatch.setattr(server_module, "_patch_upnp_server_skip_ssdp", lambda: None)
+    monkeypatch.setattr(server_module, "_patch_upnp_server", lambda: None)
     monkeypatch.setattr(server_module, "make_device_class", lambda *_args: object)
     monkeypatch.setattr(server_module, "UpnpServer", UpnpServer)
     monkeypatch.setattr(server_module, "SsdpListener", FakeListener)
@@ -501,3 +548,29 @@ def test_dlna_start_bind_scope_follows_config(monkeypatch) -> None:
     asyncio.run(server.async_start())
     assert captured["source"] == ("192.0.2.10", 1900)
     assert captured["allowed_ips"] == ["192.0.2.10"]
+
+
+def test_action_handler_patch_registers_controller_context(monkeypatch) -> None:
+    """库补丁把 request.remote 登记为控制点上下文，处理完复位。"""
+    import async_upnp_client.server as upnp_server_module
+
+    from ydlna.dlna._control_context import current_controller_ip
+
+    seen: list[str | None] = []
+
+    async def fake_action_handler(service, request):  # noqa: ANN001, ANN202
+        seen.append(current_controller_ip())
+        return "SOAP-RESPONSE"
+
+    monkeypatch.setattr(upnp_server_module, "action_handler", fake_action_handler)
+    monkeypatch.setattr(server_module, "_UPNP_PATCHED", False)
+    server_module._patch_upnp_server()
+
+    # 模块级 action_handler 已被包装（partial 在 _async_start_http_server
+    # 运行时才解析，因此运行前替换全局名即可生效）
+    assert upnp_server_module.action_handler is not fake_action_handler
+    request = SimpleNamespace(remote="192.0.2.44")
+    result = asyncio.run(upnp_server_module.action_handler(object(), request))
+
+    assert result == "SOAP-RESPONSE"
+    assert seen == ["192.0.2.44"]

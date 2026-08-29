@@ -39,6 +39,26 @@ def test_canonical_version_strips_traversal_payload(tag: str, expected: str) -> 
     assert "/" not in expected and "\\" not in expected
 
 
+def test_validated_download_dest_rejects_directory_escape(
+    tmp_path, monkeypatch
+) -> None:  # noqa: ANN001
+    """写盘前必须校验最终路径仍在下载目录内（防 ../ 逃逸）。"""
+    monkeypatch.setattr(updater, "download_dir", lambda: tmp_path)
+
+    inside = tmp_path / "LightCast-Setup-0.1.28.exe"
+    assert updater._validated_download_dest(inside) == inside
+
+    # 相对分量逃逸：resolve 后父目录不再是下载目录，必须拦截
+    with pytest.raises(ValueError):
+        updater._validated_download_dest(tmp_path / ".." / "outside.exe")
+    # 绝对路径逃逸
+    with pytest.raises(ValueError):
+        updater._validated_download_dest(tmp_path.parent / "evil.exe")
+    # 目录内的相对分量（resolve 后仍在下载目录内）合法
+    ok = updater._validated_download_dest(tmp_path / "sub" / ".." / "inside.exe")
+    assert ok == (tmp_path / "inside.exe").resolve()
+
+
 def test_sha256_file(tmp_path) -> None:  # noqa: ANN001
     path = tmp_path / "installer.exe"
     payload = b"trusted release artifact"

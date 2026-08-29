@@ -19,7 +19,7 @@ from qfluentwidgets import Theme, setTheme, setThemeColor
 from .async_tasks import BackgroundTasks
 from .config import Config
 from .constants import APP_NAME
-from .dlna.renderer_bridge import RendererBridge, url_source_host
+from .dlna.renderer_bridge import RendererBridge
 from .dlna.server import DlnaServer, get_local_ip
 from .i18n import Translator, set_language
 from .logger import get_logger, setup_logging
@@ -197,9 +197,10 @@ async def run() -> int:
     bridge.on_cast_started = on_cast_started
 
     # ---- 投屏确认门控（局域网任意投屏防护）----
-    # DLNA 协议无鉴权，同一网络内任何设备都能直接投屏。首次来自新来源主机
-    # （按投屏 URL 的 host 识别）的请求弹窗确认，同一来源本次运行内不再打扰；
-    # 超时未确认自动拒绝。确认协程由 bridge 在 SetAVTransportURI 事务内 await。
+    # DLNA 协议无鉴权，同一网络内任何设备都能直接投屏。首次来自新控制点
+    # （真实 SOAP peer IP，由 server 层登记）的投屏弹窗确认，同一控制点
+    # 本次运行内不再打扰；超时未确认自动拒绝。授权后该控制点的全部状态
+    # 变更 action（SetURI/Play/Pause/Stop/Seek/Volume/Mute）才被放行。
     CAST_CONFIRM_TIMEOUT = 30.0
 
     def _present_window_for_dialog() -> None:
@@ -211,18 +212,21 @@ async def run() -> int:
         window.raise_()
         window.activateWindow()
 
-    async def _confirm_cast_dialog(url: str, title: str) -> bool:
-        """弹窗询问是否允许本次投屏；返回 True 放行，False/超时拒绝。"""
+    async def _confirm_cast_dialog(
+        controller_ip: str, url: str, title: str
+    ) -> bool:
+        """弹窗询问是否允许该控制点投屏；返回 True 放行，False/超时拒绝。"""
         from PySide6.QtWidgets import QMessageBox
         from qfluentwidgets import InfoBar, InfoBarPosition
         from .i18n import tr
 
         _present_window_for_dialog()
-        host = url_source_host(url)
         box = QMessageBox(window)
         box.setWindowTitle(tr("dialog.cast_confirm.title"))
         box.setIcon(QMessageBox.Icon.Question)
-        box.setText(tr("dialog.cast_confirm.body", title=title, host=host))
+        box.setText(
+            tr("dialog.cast_confirm.body", title=title, ip=controller_ip)
+        )
         allow_btn = box.addButton(
             tr("dialog.cast_confirm.allow"), QMessageBox.ButtonRole.AcceptRole
         )
@@ -241,10 +245,10 @@ async def run() -> int:
             await asyncio.wait_for(answered, timeout=CAST_CONFIRM_TIMEOUT)
         except asyncio.TimeoutError:
             box.reject()
-            log.info("投屏确认超时，已自动拒绝: host=%s", host)
+            log.info("投屏确认超时，已自动拒绝: controller=%s", controller_ip)
             InfoBar.warning(
                 title=tr("dialog.cast_confirm.timeout"),
-                content=tr("dialog.cast_confirm.timeout.body", host=host),
+                content=tr("dialog.cast_confirm.timeout.body", ip=controller_ip),
                 orient=Qt.Horizontal,
                 isClosable=True,
                 duration=6000,
@@ -253,7 +257,10 @@ async def run() -> int:
             )
             return False
         allowed = box.clickedButton() is allow_btn
-        log.info("投屏确认结果: %s host=%s", "允许" if allowed else "拒绝", host)
+        log.info(
+            "投屏确认结果: %s controller=%s",
+            "允许" if allowed else "拒绝", controller_ip,
+        )
         return allowed
 
     bridge.cast_gate = _confirm_cast_dialog

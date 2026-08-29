@@ -258,22 +258,17 @@ async def rank_sources(url: str, use_mirror: bool = True) -> list[str]:
 
 
 def _validated_download_dest(dest: Path) -> Path:
-    """写盘前校验下载目标，只允许纯文件名落在下载目录内。
+    """写盘前校验下载目标必须恰好位于下载目录内。
 
-    dest 的文件名部分来自网络（release tag / 资产名），这里显式拒绝
-    路径分隔符与相对分量：即使上游拼名逻辑被改动，open() 也不可能
-    写到下载目录之外。
+    dest 的文件名部分来自网络（release tag / 资产名）。只看 ``Path.name``
+    防不住目录穿越（``updates/../outside.exe`` 的 name 是 ``outside.exe``），
+    因此对最终路径做 resolve 后比对父目录，杜绝逃逸到下载目录之外。
     """
-    name = dest.name
-    if (
-        not name
-        or name in (".", "..")
-        or "/" in name
-        or "\\" in name
-        or ":" in name
-    ):
-        raise ValueError(f"非法的下载文件名: {name!r}")
-    return dest.parent / name
+    base = download_dir().resolve()
+    target = dest.resolve()
+    if target.parent != base:
+        raise ValueError(f"下载目标必须位于下载目录内: {dest}")
+    return target
 
 
 async def download_update(

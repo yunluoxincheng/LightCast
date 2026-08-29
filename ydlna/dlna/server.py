@@ -23,10 +23,12 @@ import sys
 from typing import Optional
 
 from async_upnp_client.server import UpnpServer
+import async_upnp_client.server as _upnp_server_module
 
 from ..config import Config
 from ..constants import APP_NAME, APP_VERSION, DEFAULT_SSDP_PORT
 from ..logger import get_logger
+from ._control_context import reset_controller_ip, set_controller_ip
 from ._net import get_local_ip
 from .avtransport import AVTransportService
 from .connection_manager import ConnectionManagerService
@@ -41,10 +43,17 @@ log = get_logger("dlna.server")
 _UPNP_PATCHED = False
 
 
-def _patch_upnp_server_skip_ssdp() -> None:
-    """让 UpnpServer.async_start 只启动 HTTP server，不启动它自带的 SSDP。
+def _patch_upnp_server() -> None:
+    """对 async_upnp_client 库做两处全局补丁（只打一次）：
 
-    SSDP 由我们的 SsdpListener 线程接管（在 Windows 的 IOCP 下更可靠）。
+    1. ``UpnpServer.async_start`` 只启动 HTTP server，不启动它自带的 SSDP。
+       SSDP 由我们的 SsdpListener 线程接管（在 Windows 的 IOCP 下更可靠）。
+    2. 包装模块级 ``action_handler``：SOAOP 控制请求入口用 ``request.remote``
+       把真实控制点 IP 登记到 ContextVar，供 Bridge 做「控制点授权」
+       （H7：Play/Pause/Stop/Seek/音量等状态变更 action 需要区分来源）。
+       aiohttp 每个请求是独立任务，ContextVar 按任务复制，天然隔离并发。
+       注意：`_async_start_http_server` 里 ``partial(action_handler, ...)``
+       是运行时模块全局查找，本补丁必须在 async_start 之前生效。
     """
     global _UPNP_PATCHED
     if _UPNP_PATCHED:
@@ -78,6 +87,26 @@ def _patch_upnp_server_skip_ssdp() -> None:
     UpnpServer.async_start = _async_start_no_ssdp
     log.debug("已 patch UpnpServer.async_start（跳过自带 SSDP，base_uri 用 %s）", get_local_ip())
 
+    _orig_action_handler = getattr(_upnp_server_module, "action_handler", None)
+    if _orig_action_handler is None:
+        # 库升级改变了内部结构：控制点 IP 拿不到，授权将 fail-closed，
+        # 所有状态变更 action 都会被拒绝——必须在这里就大声报错。
+        log.error(
+            "async_upnp_client.server.action_handler 不存在（库结构已变化），"
+            "控制点授权上下文不可用；请检查库版本兼容性"
+        )
+        return
+
+    async def _action_handler_with_context(service, request):  # noqa: ANN001, ANN202
+        token = set_controller_ip(request.remote)
+        try:
+            return await _orig_action_handler(service, request)
+        finally:
+            reset_controller_ip(token)
+
+    _upnp_server_module.action_handler = _action_handler_with_context
+    log.debug("已 patch action_handler（登记控制点 IP 上下文）")
+
 
 class DlnaServer:
     """DLNA MediaRenderer 服务封装（HTTP + 自研 SSDP）。"""
@@ -103,8 +132,8 @@ class DlnaServer:
         if self._running:
             return
 
-        # 让 UpnpServer 只跑 HTTP，SSDP 由我们的线程接管
-        _patch_upnp_server_skip_ssdp()
+        # 库补丁（跳过自带 SSDP + 控制点 IP 上下文）
+        _patch_upnp_server()
 
         friendly_name = self._config.get("friendly_name", "轻投")
         udn = self._config.get("udn")
