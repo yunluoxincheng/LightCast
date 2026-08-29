@@ -205,6 +205,74 @@ def test_authorized_set_uri_publishes_candidate_after_gate() -> None:
     asyncio.run(scenario())
 
 
+def test_unauthorized_set_next_uri_leaves_state_untouched() -> None:
+    """三审补漏：NextAVTransportURI(-MetaData) 是 evented 状态，未授权不得改写。"""
+    async def scenario() -> None:
+        avt = AVTransportService(object())
+        bridge = _authorized_bridge(avt)
+        avt.bridge = bridge
+        avt.state_variable("NextAVTransportURI").value = "https://previous.example/next.mp4"
+        avt.state_variable("NextAVTransportURIMetaData").value = "<DIDL-Lite>next</DIDL-Lite>"
+
+        with _controller(CONTROLLER_B):
+            with pytest.raises(UpnpActionError):
+                await avt.set_next_av_transport_uri(
+                    0, "https://attacker.example/next.mp4", "evil"
+                )
+
+        assert avt.state_variable("NextAVTransportURI").value == (
+            "https://previous.example/next.mp4"
+        )
+        assert avt.state_variable("NextAVTransportURIMetaData").value == (
+            "<DIDL-Lite>next</DIDL-Lite>"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_authorized_set_next_uri_updates_state() -> None:
+    async def scenario() -> None:
+        avt = AVTransportService(object())
+        bridge = _authorized_bridge(avt)
+        avt.bridge = bridge
+
+        with _controller(CONTROLLER_A):
+            await avt.set_next_av_transport_uri(
+                0, "https://public.example/next.mp4", ""
+            )
+
+        assert avt.state_variable("NextAVTransportURI").value == (
+            "https://public.example/next.mp4"
+        )
+        assert bridge._confirmed_controllers == {CONTROLLER_A}
+
+    asyncio.run(scenario())
+
+
+def test_missing_bridge_actions_fail_closed() -> None:
+    """bridge 未装配（装配异常/库升级）时状态写 action 一律 SOAP fault。"""
+    async def scenario() -> None:
+        set_controller_ip(CONTROLLER_A)  # 即使来自已授权地址也一样
+
+        rc = RenderingControlService(object())  # bridge 保持 None
+        with pytest.raises(UpnpActionError):
+            await rc.set_volume(0, "Master", 50)
+        assert rc.state_variable("Volume").value == 80
+        with pytest.raises(UpnpActionError):
+            await rc.set_mute(0, "Master", True)
+        assert rc.state_variable("Mute").value is False
+
+        avt = AVTransportService(object())
+        with pytest.raises(UpnpActionError):
+            await avt.set_av_transport_uri(0, "https://public.example/v.mp4", "")
+        assert avt.state_variable("AVTransportURI").value is None
+        with pytest.raises(UpnpActionError):
+            await avt.set_next_av_transport_uri(0, "https://public.example/n.mp4", "")
+        assert avt.state_variable("NextAVTransportURI").value == ""
+
+    asyncio.run(scenario())
+
+
 def test_controller_context_isolated_per_request() -> None:
     assert current_controller_ip() is None
     with _controller(CONTROLLER_A):

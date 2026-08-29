@@ -20,6 +20,23 @@ def _listener() -> SsdpListener:
     )
 
 
+def _fake_device_services() -> dict[str, object]:
+    """fake UpnpServer 设备携带齐全的真实 service 实例。
+
+    async_start 现在在缺 service 时直接启动失败（fail-closed），
+    走 SSDP 等待路径的测试需要 device 上有三个可发现的 service。
+    """
+    from ydlna.dlna.avtransport import AVTransportService
+    from ydlna.dlna.connection_manager import ConnectionManagerService
+    from ydlna.dlna.rendering_control import RenderingControlService
+
+    return {
+        "avt": AVTransportService(object()),
+        "rc": RenderingControlService(object()),
+        "cm": ConnectionManagerService(object()),
+    }
+
+
 def test_ssdp_stop_sends_byebye_joins_thread_and_closes_resources(
     monkeypatch,
 ) -> None:
@@ -192,7 +209,7 @@ def test_dlna_start_waits_for_ssdp_readiness_and_propagates_failure(
 
     class UpnpServer:
         def __init__(self, **_kwargs) -> None:  # noqa: ANN003
-            self._device = SimpleNamespace(services={})
+            self._device = SimpleNamespace(services=_fake_device_services())
             self.base_uri = "http://192.0.2.10:12345"
             self.stop_calls = 0
 
@@ -271,7 +288,7 @@ def test_dlna_start_ssdp_wait_does_not_block_event_loop(monkeypatch) -> None:
 
     class UpnpServer:
         def __init__(self, **_kwargs) -> None:  # noqa: ANN003
-            self._device = SimpleNamespace(services={})
+            self._device = SimpleNamespace(services=_fake_device_services())
             self.base_uri = "http://192.0.2.10:12345"
 
         async def async_start(self) -> None:
@@ -506,7 +523,7 @@ def test_dlna_start_bind_scope_follows_config(monkeypatch) -> None:
     class UpnpServer:
         def __init__(self, **kwargs) -> None:  # noqa: ANN003
             captured["source"] = kwargs.get("source")
-            self._device = SimpleNamespace(services={})
+            self._device = SimpleNamespace(services=_fake_device_services())
             self.base_uri = "http://192.0.2.10:12345"
 
         async def async_start(self) -> None:

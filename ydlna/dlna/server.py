@@ -165,9 +165,15 @@ class DlnaServer:
         rc = _find_service(device, RenderingControlService)
         cm = _find_service(device, ConnectionManagerService)
         if avt is None or rc is None or cm is None:
-            log.error("无法从设备实例获取 service（avt=%s rc=%s cm=%s）", avt, rc, cm)
-        else:
-            self._bridge.set_services(avt, rc, cm)
+            # 缺 service 时继续提供服务会进入「安全组件未装配但 SOAP 写接口
+            # 仍开放」的半失效状态（各 service 已 fail-closed，这里再让启动
+            # 干脆失败，避免用户误以为投屏服务正常）。
+            log.error(
+                "无法从设备实例获取 service（avt=%s rc=%s cm=%s），启动失败",
+                avt, rc, cm,
+            )
+            raise RuntimeError("无法从设备实例获取 DLNA service，DLNA 服务启动失败")
+        self._bridge.set_services(avt, rc, cm)
 
         # 读取实际 HTTP 端口（http_port=0 时由系统分配）
         self._http_port = _resolve_http_port(self._server)

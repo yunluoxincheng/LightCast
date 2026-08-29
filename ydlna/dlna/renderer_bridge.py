@@ -443,12 +443,14 @@ class RendererBridge:
             self._confirmed_controllers.add(controller)
         return allowed
 
-    def _ensure_authorized_controller(self, action: str) -> None:
-        """状态变更类 action 只允许已授权控制点；未授权直接 SOAP fault。
+    def ensure_authorized_controller(self, action: str) -> None:
+        """控制点授权检查（service 写 action 在任何状态变更前调用）。
 
-        覆盖 Play/Pause/Stop/Seek/SetVolume/SetMute——否则攻击者即使从未
-        通过投屏确认，也能暂停/停止播放、任意 Seek、把音量调满或静音。
-        require_cast_confirm 关闭（无鉴权模式）时不检查。
+        状态变更类 action 只允许已授权控制点；未授权直接 SOAP fault。
+        覆盖 SetURI/Play/Pause/Stop/Seek/SetVolume/SetMute/SetNextURI——
+        否则攻击者即使从未通过投屏确认，也能暂停/停止播放、任意 Seek、
+        把音量调满或静音、篡改队列中的下一个媒体。require_cast_confirm
+        关闭（无鉴权模式）时不检查。
         """
         if not self._require_cast_confirm():
             return
@@ -508,20 +510,20 @@ class RendererBridge:
                     setattr(self, attr, None)
 
     def on_play(self) -> None:
-        self._ensure_authorized_controller("Play")
+        self.ensure_authorized_controller("Play")
         log.info("桥接: 播放")
         self._player.set_paused(False)
         self._set_transport_state("PLAYING")
         self._start_polling()
 
     def on_pause(self) -> None:
-        self._ensure_authorized_controller("Pause")
+        self.ensure_authorized_controller("Pause")
         log.info("桥接: 暂停")
         self._player.set_paused(True)
         self._set_transport_state("PAUSED_PLAYBACK")
 
     def on_stop(self) -> None:
-        self._ensure_authorized_controller("Stop")
+        self.ensure_authorized_controller("Stop")
         log.info("桥接: 停止")
         self._player.stop()
         self._set_transport_state("STOPPED")
@@ -533,7 +535,7 @@ class RendererBridge:
 
     def on_seek(self, unit: str, target: str) -> None:
         """unit ∈ {ABS_TIME, REL_TIME, ABS_COUNT, REL_COUNT, TRACK_NR}。"""
-        self._ensure_authorized_controller("Seek")
+        self.ensure_authorized_controller("Seek")
         if unit in ("REL_TIME", "ABS_TIME"):
             seconds = dlna_time_to_seconds(target)
             if seconds is not None:
@@ -543,11 +545,11 @@ class RendererBridge:
             log.warning("不支持的 seek 类型: %s", unit)
 
     def on_set_volume(self, volume: int) -> None:
-        self._ensure_authorized_controller("SetVolume")
+        self.ensure_authorized_controller("SetVolume")
         self._player.set_volume(volume)
 
     def on_set_mute(self, muted: bool) -> None:
-        self._ensure_authorized_controller("SetMute")
+        self.ensure_authorized_controller("SetMute")
         self._player.set_mute(muted)
 
     # ------------------------------------------------------------------ #
