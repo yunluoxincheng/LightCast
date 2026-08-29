@@ -261,7 +261,8 @@ def test_rejected_cast_sets_error_and_keeps_controller_unauthorized() -> None:
     bridge = _gated_bridge(gate)
     bridge.on_cast_started = lambda: ui_calls.append(1)
     with _controller(CONTROLLER_A):
-        asyncio.run(bridge.on_set_uri("https://public.example/video.mp4", ""))
+        with pytest.raises(UpnpActionError):
+            asyncio.run(bridge.on_set_uri("https://public.example/video.mp4", ""))
 
     assert gate_calls == [CONTROLLER_A]
     assert ui_calls == []
@@ -281,7 +282,8 @@ def test_gate_exception_rejects_cast() -> None:
 
     bridge = _gated_bridge(gate)
     with _controller(CONTROLLER_A):
-        asyncio.run(bridge.on_set_uri("https://public.example/video.mp4", ""))
+        with pytest.raises(UpnpActionError):
+            asyncio.run(bridge.on_set_uri("https://public.example/video.mp4", ""))
 
     assert bridge._player.played == []
     assert bridge._avt.state_variable("TransportStatus").value == "ERROR_OCCURRED"
@@ -295,7 +297,8 @@ def test_missing_controller_ip_is_fail_closed() -> None:
 
     bridge = _gated_bridge(gate)
     with _controller(None):
-        asyncio.run(bridge.on_set_uri("https://public.example/video.mp4", ""))
+        with pytest.raises(UpnpActionError):
+            asyncio.run(bridge.on_set_uri("https://public.example/video.mp4", ""))
 
     assert bridge._player.played == []
     assert bridge._avt.state_variable("TransportStatus").value == "ERROR_OCCURRED"
@@ -305,7 +308,8 @@ def test_missing_controller_ip_is_fail_closed() -> None:
 def test_missing_gate_injection_is_fail_closed() -> None:
     bridge = _gated_bridge(None)
     with _controller(CONTROLLER_A):
-        asyncio.run(bridge.on_set_uri("https://public.example/video.mp4", ""))
+        with pytest.raises(UpnpActionError):
+            asyncio.run(bridge.on_set_uri("https://public.example/video.mp4", ""))
 
     assert bridge._player.played == []
     assert bridge._avt.state_variable("TransportStatus").value == "ERROR_OCCURRED"

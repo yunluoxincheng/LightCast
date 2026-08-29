@@ -254,9 +254,8 @@ class RendererBridge:
         ):
             self._write_state_variable(avt, name, value)
         self._write_state_variable(rc, "Volume", self._player.get_volume())
-        self._write_state_variable(
-            rc, "Mute", "1" if self._player.is_muted() else "0"
-        )
+        # Mute 状态变量是 boolean 类型，必须写真实 bool（写 "1"/"0" 会被库拒绝）
+        self._write_state_variable(rc, "Mute", self._player.is_muted())
 
         self._last_position = position
         self._last_duration = duration
@@ -289,14 +288,12 @@ class RendererBridge:
         """
         title = parse_title_from_didl(meta) or url
         log.info("桥接: 设置媒体 title=%r url=%s", title, url)
-        # URI/meta 先作为本次事务的候选值写给 service；只有代理初始化且
-        # Player.play() 成功返回后才提交到 Bridge。失败则恢复上一份已提交身份。
-        self._begin_transport_attempt(url, meta)
 
-        # 第一道：scheme 白名单
+        # 第一道：scheme 白名单。所有拒绝都发生在写入任何 evented 状态之前，
+        # 候选 URI 不会短暂暴露给 GENA 订阅者。
         if not url.lower().startswith(("http://", "https://")):
             log.warning("拒绝非 http(s) 投屏 URL（可能尝试读取本地文件）: %s", url)
-            self._fail_transport_attempt()
+            self._set_transport_status("ERROR_OCCURRED")
             return
 
         # 第二道：入口安全校验。被拦（UrlBlockedError）→ 直接 ERROR，绝不 fallback。
@@ -306,19 +303,28 @@ class RendererBridge:
             validate_upstream_url(url, allow_intranet=allow_intranet)
         except UrlBlockedError as e:
             log.warning("投屏 URL 被安全策略拦截: %s（%s）", url, e.reason)
-            self._fail_transport_attempt()
+            self._set_transport_status("ERROR_OCCURRED")
             return
 
-        # 第三道（产品层）：控制点授权 + 投屏确认。同样在 cb() 之前——被拒绝的
-        # 投屏不切页、不显示缓冲动画；复用 _fail_transport_attempt 恢复上一份身份。
+        # 第三道：控制点授权 + 投屏确认。授权是第一道状态变更门槛——通过之前
+        # 不发布候选 URI / TransportState（service 的 AVTransportURI 等都是
+        # evented 变量，先写再确认会让订阅者看到未批准的媒体）。被拒绝的投屏
+        # 不切页、不显示缓冲动画，并以 SOAP fault 拒绝本次 action，控制点
+        # 不会误以为投屏已被接受。
         controller = current_controller_ip()
         if not await self._confirm_cast(controller, url, title):
             log.info(
                 "投屏请求未获本机确认，已拒绝: controller=%s title=%r",
                 controller, title,
             )
-            self._fail_transport_attempt()
-            return
+            self._set_transport_status("ERROR_OCCURRED")
+            raise UpnpActionError(
+                error_desc="控制点未获授权", message="controller not authorized"
+            )
+
+        # 授权通过后才发布候选请求状态（evented）；只有代理初始化且
+        # Player.play() 成功返回后才提交到 Bridge。失败则恢复上一份已提交身份。
+        self._begin_transport_attempt(url, meta)
 
         # 先通知 UI「投屏到达」：立即切到播放器页并显示缓冲动画，
         # 代理/解码在后台进行（用户体感秒进）
@@ -562,9 +568,8 @@ class RendererBridge:
 
     def _on_player_mute(self, muted: bool) -> None:
         if self._rc is not None:
-            self._write_state_variable(
-                self._rc, "Mute", "1" if muted else "0"
-            )
+            # Mute 状态变量是 boolean 类型，必须写真实 bool
+            self._write_state_variable(self._rc, "Mute", muted)
 
     def _set_transport_state(self, dlna_state: str) -> None:
         if dlna_state not in _TRANSPORT_STATES:
