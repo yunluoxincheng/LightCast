@@ -19,7 +19,7 @@ from qfluentwidgets import Theme, setTheme, setThemeColor
 from .async_tasks import BackgroundTasks
 from .config import Config
 from .constants import APP_NAME
-from .dlna.renderer_bridge import RendererBridge
+from .dlna.renderer_bridge import RendererBridge, url_source_host
 from .dlna.server import DlnaServer, get_local_ip
 from .i18n import Translator, set_language
 from .logger import get_logger, setup_logging
@@ -195,6 +195,68 @@ async def run() -> int:
         window.playerInterface.show_buffering(override=True)
 
     bridge.on_cast_started = on_cast_started
+
+    # ---- 投屏确认门控（局域网任意投屏防护）----
+    # DLNA 协议无鉴权，同一网络内任何设备都能直接投屏。首次来自新来源主机
+    # （按投屏 URL 的 host 识别）的请求弹窗确认，同一来源本次运行内不再打扰；
+    # 超时未确认自动拒绝。确认协程由 bridge 在 SetAVTransportURI 事务内 await。
+    CAST_CONFIRM_TIMEOUT = 30.0
+
+    def _present_window_for_dialog() -> None:
+        """确认弹窗必须可见：静默托盘 / 最小化状态下先恢复窗口。"""
+        if window.isMinimized():
+            window.showNormal()
+        elif not window.isVisible():
+            window.show()
+        window.raise_()
+        window.activateWindow()
+
+    async def _confirm_cast_dialog(url: str, title: str) -> bool:
+        """弹窗询问是否允许本次投屏；返回 True 放行，False/超时拒绝。"""
+        from PySide6.QtWidgets import QMessageBox
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        from .i18n import tr
+
+        _present_window_for_dialog()
+        host = url_source_host(url)
+        box = QMessageBox(window)
+        box.setWindowTitle(tr("dialog.cast_confirm.title"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(tr("dialog.cast_confirm.body", title=title, host=host))
+        allow_btn = box.addButton(
+            tr("dialog.cast_confirm.allow"), QMessageBox.ButtonRole.AcceptRole
+        )
+        box.addButton(tr("common.cancel"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(allow_btn)
+
+        answered: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        box.finished.connect(
+            lambda *_a: None if answered.done() else answered.set_result(None)
+        )
+        box.finished.connect(box.deleteLater)
+        # 非阻塞 open()：绝不 exec() 嵌套事件循环（qasync 下会冻结）
+        box.open()
+
+        try:
+            await asyncio.wait_for(answered, timeout=CAST_CONFIRM_TIMEOUT)
+        except asyncio.TimeoutError:
+            box.reject()
+            log.info("投屏确认超时，已自动拒绝: host=%s", host)
+            InfoBar.warning(
+                title=tr("dialog.cast_confirm.timeout"),
+                content=tr("dialog.cast_confirm.timeout.body", host=host),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=6000,
+                parent=window,
+                position=InfoBarPosition.TOP,
+            )
+            return False
+        allowed = box.clickedButton() is allow_btn
+        log.info("投屏确认结果: %s host=%s", "允许" if allowed else "拒绝", host)
+        return allowed
+
+    bridge.cast_gate = _confirm_cast_dialog
 
     # DLNA 投屏到达 → 切到播放器页（内嵌渲染区）
     def on_cast(title: str, url: str) -> None:

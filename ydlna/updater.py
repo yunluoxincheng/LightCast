@@ -75,6 +75,16 @@ def is_newer(remote: str, current: str) -> bool:
     return parse_version(remote) > parse_version(current)
 
 
+def canonical_version(tag: str) -> str:
+    """把 release tag 规范成 X.Y.Z 数字段。
+
+    tag 来自网络（GitHub API），可能带预发布后缀或意外字符；原样拼进
+    下载文件名（LightCast-Setup-<version>.exe）会构成路径穿越，写盘前
+    必须保证文件名不含路径分隔符。
+    """
+    return "{}.{}.{}".format(*parse_version(tag))
+
+
 async def check_for_update() -> Optional[UpdateInfo]:
     """查 GitHub 最新 Release。
 
@@ -90,7 +100,7 @@ async def check_for_update() -> Optional[UpdateInfo]:
                 raise RuntimeError(f"GitHub API 返回 HTTP {resp.status}")
             data = await resp.json()
     tag = data.get("tag_name", "") or ""
-    version = tag.lstrip("v")
+    version = canonical_version(tag)
     if not is_newer(version, __version__):
         return None
     assets = {
@@ -247,6 +257,25 @@ async def rank_sources(url: str, use_mirror: bool = True) -> list[str]:
     return ranked
 
 
+def _validated_download_dest(dest: Path) -> Path:
+    """写盘前校验下载目标，只允许纯文件名落在下载目录内。
+
+    dest 的文件名部分来自网络（release tag / 资产名），这里显式拒绝
+    路径分隔符与相对分量：即使上游拼名逻辑被改动，open() 也不可能
+    写到下载目录之外。
+    """
+    name = dest.name
+    if (
+        not name
+        or name in (".", "..")
+        or "/" in name
+        or "\\" in name
+        or ":" in name
+    ):
+        raise ValueError(f"非法的下载文件名: {name!r}")
+    return dest.parent / name
+
+
 async def download_update(
     url: str,
     dest: Path,
@@ -264,7 +293,7 @@ async def download_update(
       单线程流式下载
     - 分块写盘，不阻塞事件循环；on_progress(done, total) 在主线程协程内回调
     """
-    dest = Path(dest)
+    dest = _validated_download_dest(Path(dest))
     timeout = aiohttp.ClientTimeout(total=None, connect=15)
 
     order = await rank_sources(url, use_mirror)
@@ -317,7 +346,7 @@ async def _download_from_source(
                         raise RuntimeError(f"下载失败: HTTP {resp.status}")
                     total = int(resp.headers.get("Content-Length") or 0)
                     done = 0
-                    with open(dest, "wb") as f:
+                    with dest.open("wb") as f:
                         async for chunk in resp.content.iter_chunked(256 * 1024):
                             f.write(chunk)
                             done += len(chunk)
@@ -344,9 +373,9 @@ async def _download_from_source(
 
     # 定位写：各 worker 写不同偏移。asyncio 单线程、write 同步完成，
     # seek+write 之间没有 await，不存在交错；os.pwrite 在 Windows 不可用
-    with open(dest, "wb") as f:
+    with dest.open("wb") as f:
         f.truncate(total)
-    fh = open(dest, "r+b")
+    fh = dest.open("r+b")
     done_bytes = 0
 
     async def worker(i: int) -> None:

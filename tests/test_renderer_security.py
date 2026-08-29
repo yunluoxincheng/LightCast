@@ -79,6 +79,11 @@ def _bridge_with_setup(setup):  # noqa: ANN001, ANN202
     bridge._direct_proxy = None
     bridge.on_cast_started = None
     bridge._allow_intranet = lambda: True
+    # 投屏确认门控：测试聚焦 SSRF/代理语义，门控保持「开启但不弹窗」
+    # （cast_gate=None 直接放行），不触碰真实 Config 单例。
+    bridge._require_cast_confirm = lambda: True
+    bridge.cast_gate = None
+    bridge._confirmed_hosts = set()
 
     async def setup_candidate(url: str, *, allow_intranet: bool):  # noqa: ANN202
         result = await setup(url, allow_intranet=allow_intranet)

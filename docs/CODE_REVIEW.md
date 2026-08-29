@@ -173,7 +173,7 @@
 ### H7. 局域网任意投屏（无鉴权）
 
 - **文件**：`ydlna/dlna/server.py:111`；`ydlna/dlna/ssdp_listener.py`
-- **状态**：`[ ]`
+- **状态**：`[x]` 已修复（2026-08-29）：新增「投屏需本机确认」且默认开启——`SetAVTransportURI` 在通过 SSRF 安全校验后、切换 UI 与创建代理之前，经注入的确认协程弹窗询问用户（自动唤起主窗口），30 秒未确认自动拒绝；拒绝、超时与门控异常（fail-closed）都走既有错误路径恢复上一份媒体身份并置 `TransportStatus=ERROR_OCCURRED`，被安全策略拦截的 URL 不会触发弹窗。「首次」按投屏 URL 来源主机（`url_source_host`，剥 userinfo、IPv6 加方括号）做会话级记忆，同来源确认过一次后本次运行内不再打扰；SOAP 请求拿不到控制点 IP，来源主机是最接近的设备近似。新增「仅通过默认网卡投屏」开关（默认关闭）：开启后 HTTP/SOAP 只绑定 `get_local_ip()`，SSDP 多播 membership / sender / M-SEARCH 选卡与 fallback 全部收窄到 `filter_interfaces` 白名单内（重启投屏服务后生效）。README 明示公共 Wi-Fi 投屏风险与两项开关用法。新增测试覆盖门控同意 / 拒绝 / 异常、同来源会话记忆、拦截 URL 不弹窗、配置关闭与未注入降级路径，以及网卡白名单过滤、M-SEARCH 选卡边界与绑定地址随配置切换。
 - **问题**：HTTP / SOAP 绑 `0.0.0.0` 无鉴权，任何同二层网络设备（咖啡店 / 酒店 Wi-Fi 的陌生人）
   都能直接投屏 / 调音量。属 DLNA 协议本质。
 - **建议**：文档明示风险；提供「仅可信网络」开关（只在指定网卡 announce）；首次投屏弹窗确认。

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import TYPE_CHECKING, Optional
+from urllib.parse import urlsplit
 
 from defusedxml import ElementTree as ET  # 安全 XML 解析
 
@@ -124,6 +125,29 @@ def url_is_image(url: str) -> bool:
     return path.endswith(_IMAGE_EXTS)
 
 
+def url_source_host(url: str) -> str:
+    """从投屏 URL 提取小写 host[:port]，作为来源设备的会话记忆键。
+
+    SOAP 请求里拿不到控制点的 IP，来源主机是「同一台设备」最接近的近似
+    （每台设备的媒体都由它自己的地址提供）。剥掉 userinfo，避免把可能
+    出现在 URL 里的凭据用作记忆键或展示内容。
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if not host:
+            return url
+        port = parts.port
+    except ValueError:
+        return url
+    if port is None:
+        return host
+    # IPv6 字面量按 URL 惯例加方括号，端口不至于和地址混淆
+    if ":" in host:
+        return f"[{host}]:{port}"
+    return f"{host}:{port}"
+
+
 class RendererBridge:
     """DLNA 协议层 ↔ 播放器层的桥接器。
 
@@ -153,6 +177,12 @@ class RendererBridge:
         # 投屏到达（SetAVTransportURI）回调：由 app 注入，用于立即切页 + 缓冲动画
         # （不等代理/解码，用户体感秒进播放器页）
         self.on_cast_started = None  # Callable[[], None] | None
+        # 投屏确认门控：由 app 注入 async (url, title) -> bool，弹窗询问用户。
+        # 返回 True 放行，False 拒绝。未注入（测试 / 无 UI 降级）时直接放行。
+        self.cast_gate = None  # Callable[[str, str], Awaitable[bool]] | None
+        # 本次运行内已确认的投屏来源主机（url_source_host），确认过一次后
+        # 同来源的后续投屏不再弹窗。
+        self._confirmed_hosts: set[str] = set()
         # 当前活跃的媒体代理（换媒体时先停旧的）
         self._hls_proxy = None
         self._direct_proxy = None
@@ -299,6 +329,13 @@ class RendererBridge:
             self._fail_transport_attempt()
             return
 
+        # 第三道（产品层）：投屏确认门控。同样在 cb() 之前——被用户拒绝的投屏
+        # 不切页、不显示缓冲动画；复用 _fail_transport_attempt 恢复上一份媒体身份。
+        if not await self._confirm_cast(url, title):
+            log.info("投屏请求未获本机确认，已拒绝: title=%r url=%s", title, url)
+            self._fail_transport_attempt()
+            return
+
         # 先通知 UI「投屏到达」：立即切到播放器页并显示缓冲动画，
         # 代理/解码在后台进行（用户体感秒进）
         cb = self.on_cast_started
@@ -371,6 +408,43 @@ class RendererBridge:
             return bool(Config.instance().get("allow_intranet_cast", True))
         except Exception:  # noqa: BLE001
             return True
+
+    def _require_cast_confirm(self) -> bool:
+        """读取「投屏需本机确认」配置（默认 True）。"""
+        try:
+            from ..config import Config
+
+            return bool(Config.instance().get("require_cast_confirm", True))
+        except Exception:  # noqa: BLE001
+            return True
+
+    async def _confirm_cast(self, url: str, title: str) -> bool:
+        """投屏确认门控：首次来自新来源主机的投屏需要本机确认。
+
+        - 配置关闭（require_cast_confirm=False）→ 直接放行；
+        - 同来源主机本次运行内确认过 → 直接放行；
+        - 其余情况 await 注入的确认协程（app 注入的弹窗），同意则把来源主机
+          记入会话集合，拒绝（或协程异常）则拒绝。
+
+        门控协程异常按拒绝处理：确认是安全增强，出问题时宁可拒绝也不能
+        退回到「无鉴权直接播放」。
+        """
+        if not self._require_cast_confirm():
+            return True
+        host = url_source_host(url)
+        if host in self._confirmed_hosts:
+            return True
+        gate = self.cast_gate
+        if gate is None:
+            return True
+        try:
+            allowed = bool(await gate(url, title))
+        except Exception as e:  # noqa: BLE001
+            log.warning("投屏确认门控异常，按拒绝处理: %s", e)
+            return False
+        if allowed:
+            self._confirmed_hosts.add(host)
+        return allowed
 
     async def _setup_proxy_candidate(
         self, url: str, *, allow_intranet: bool

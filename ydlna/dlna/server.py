@@ -111,8 +111,17 @@ class DlnaServer:
         http_port = int(self._config.get("http_port", 0))
 
         device_cls = make_device_class(friendly_name, udn)
-        # source 用 0.0.0.0（HTTP server 会绑所有接口）；base_uri 在 patch 里改真实 IP
-        source = ("0.0.0.0", DEFAULT_SSDP_PORT)
+        # source 决定 HTTP/SOAP 的监听地址：默认 0.0.0.0 绑全部网卡（兼容行为）；
+        # 「仅默认网卡」开启时只绑 get_local_ip() 所在网卡，SSDP 宣告白名单同步
+        # 收窄，多网卡 / 虚拟网卡 / 热点环境下设备不再向其他网卡暴露。base_uri
+        # patch 本来就用 get_local_ip() 拼 LOCATION，两种模式下地址都一致。
+        ssdp_allowed_ips: Optional[list[str]] = None
+        bind_host = "0.0.0.0"
+        if bool(self._config.get("bind_default_interface_only", False)):
+            bind_host = get_local_ip()
+            ssdp_allowed_ips = [bind_host]
+            log.info("仅通过默认网卡提供投屏服务: %s", bind_host)
+        source = (bind_host, DEFAULT_SSDP_PORT)
         log.info("启动 DLNA 服务: name=%r udn=%s http_port=%s", friendly_name, udn, http_port)
         self._server = UpnpServer(
             server_device=device_cls,
@@ -144,6 +153,7 @@ class DlnaServer:
             http_port=self._http_port,
             server_id=server_id,
             location_path="/device.xml",
+            allowed_ips=ssdp_allowed_ips,
         )
         self._ssdp.start()
         # Thread.start() 只表示线程已调度，不代表 bind/join multicast 成功。

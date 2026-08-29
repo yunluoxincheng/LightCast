@@ -66,6 +66,26 @@ def _parse_headers(data: bytes) -> tuple[str, dict[str, str]]:
     return cmd, headers
 
 
+def filter_interfaces(
+    ips: list[tuple[str, str]],
+    allowed_ips: list[str] | None,
+) -> list[tuple[str, str]]:
+    """按 allowed_ips 白名单过滤网卡；白名单里枚举不到的 IP 补默认掩码。
+
+    仅默认网卡模式下，多播 membership / sender / M-SEARCH 选卡都只在白名单内
+    进行；白名单中的 IP 若被网卡枚举漏掉（如 Windows ICS 兜底段），仍补上，
+    保证设备至少能在指定网卡上宣告。``allowed_ips=None`` 表示不过滤（默认）。
+    """
+    if allowed_ips is None:
+        return ips
+    allowed = set(allowed_ips)
+    filtered = [(ip, mask) for ip, mask in ips if ip in allowed]
+    present = {ip for ip, _ in filtered}
+    for ip in sorted(allowed - present):
+        filtered.append((ip, "255.255.255.0"))
+    return filtered
+
+
 class _MulticastSender:
     """绑定到特定网卡的发送 socket，用于主动多播 NOTIFY alive/byebye。
 
@@ -126,6 +146,7 @@ class SsdpListener(threading.Thread):
         server_id: str,
         location_path: str = "/device.xml",
         announce_interval: float = 30.0,
+        allowed_ips: list[str] | None = None,
     ) -> None:
         super().__init__(name="SsdpListener", daemon=True)
         # udn 形如 "uuid:xxxxxxxx-..."；USN 根用去掉 "uuid:" 前缀的部分
@@ -135,6 +156,8 @@ class SsdpListener(threading.Thread):
         self._server_id = server_id
         self._location_path = location_path
         self._announce_interval = announce_interval
+        # 网卡白名单（仅默认网卡模式）；None 表示所有网卡都宣告
+        self._allowed_ips = list(allowed_ips) if allowed_ips is not None else None
 
         self._sock: socket.socket | None = None
         self._senders: list[_MulticastSender] = []
@@ -220,8 +243,9 @@ class SsdpListener(threading.Thread):
             else:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-            # 对每块网卡都加入多播组 + 建 sender
-            self._ips = list_local_ips()
+            # 对每块网卡都加入多播组 + 建 sender（仅默认网卡模式下按白名单过滤；
+            # 后续 M-SEARCH 选卡与 fallback 都只在这个列表内进行）
+            self._ips = filter_interfaces(list_local_ips(), self._allowed_ips)
             for ip, _mask in self._ips:
                 mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton(ip)
                 try:

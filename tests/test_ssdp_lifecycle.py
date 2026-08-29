@@ -9,7 +9,7 @@ import pytest
 
 from ydlna.dlna import server as server_module
 from ydlna.dlna.server import DlnaServer
-from ydlna.dlna.ssdp_listener import SsdpListener
+from ydlna.dlna.ssdp_listener import SsdpListener, filter_interfaces
 
 
 def _listener() -> SsdpListener:
@@ -382,3 +382,122 @@ def test_dlna_stop_timeout_preserves_ssdp_reference_for_retry() -> None:
 
     assert server._ssdp is listener
     assert server._running is True
+
+
+# ---------------------------------------------------------------------- #
+# 仅默认网卡模式：网卡白名单过滤与 HTTP 绑定范围
+# ---------------------------------------------------------------------- #
+def test_filter_interfaces_whitelist() -> None:
+    ips = [
+        ("192.168.1.10", "255.255.255.0"),
+        ("10.8.0.2", "255.255.255.0"),
+        ("192.168.137.1", "255.255.255.0"),
+    ]
+    # 未启用白名单：原样返回
+    assert filter_interfaces(ips, None) == ips
+
+    filtered = filter_interfaces(ips, ["192.168.1.10"])
+    assert filtered == [("192.168.1.10", "255.255.255.0")]
+
+    # 白名单 IP 被网卡枚举漏掉（如 ICS 兜底段）时补默认掩码，
+    # 保证设备至少能在指定网卡上宣告
+    assert filter_interfaces([], ["192.0.2.10"]) == [("192.0.2.10", "255.255.255.0")]
+
+
+def test_listener_stores_allowed_ips() -> None:
+    unrestricted = _listener()
+    assert unrestricted._allowed_ips is None  # noqa: SLF001
+    restricted = SsdpListener(
+        udn="uuid:test-device",
+        http_port=12345,
+        server_id="Test/1.0 UPnP/1.1 LightCast/test",
+        allowed_ips=["192.0.2.10"],
+    )
+    assert restricted._allowed_ips == ["192.0.2.10"]  # noqa: SLF001
+
+
+def test_msearch_iface_choice_stays_within_whitelist() -> None:
+    listener = SsdpListener(
+        udn="uuid:test-device",
+        http_port=12345,
+        server_id="Test/1.0 UPnP/1.1 LightCast/test",
+        allowed_ips=["192.168.1.10"],
+    )
+    # 模拟 _setup_socket 用 filter_interfaces 过滤后的结果（不建真实 socket）
+    listener._ips = filter_interfaces(  # noqa: SLF001
+        [("192.168.1.10", "255.255.255.0"), ("10.8.0.2", "255.255.255.0")],
+        ["192.168.1.10"],
+    )
+    # 与白名单同子网的请求方正常命中
+    assert listener._choose_iface_for("192.168.1.77") == "192.168.1.10"
+    # 异网段请求方的 fallback 也只能落在白名单内
+    assert listener._choose_iface_for("10.9.9.9") == "192.168.1.10"
+
+
+def test_dlna_start_bind_scope_follows_config(monkeypatch) -> None:
+    """「仅默认网卡」开关决定 HTTP 绑定地址与 SSDP 宣告白名单。"""
+    captured: dict[str, object] = {}
+
+    class Config:
+        def __init__(self) -> None:
+            self.values = {
+                "friendly_name": "Test Renderer",
+                "udn": "uuid:test-device",
+                "http_port": 12345,
+            }
+
+        def get(self, key: str, default=None):  # noqa: ANN001, ANN202
+            return self.values.get(key, default)
+
+    class Bridge:
+        def set_services(self, *_services) -> None:  # noqa: ANN002
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+    class UpnpServer:
+        def __init__(self, **kwargs) -> None:  # noqa: ANN003
+            captured["source"] = kwargs.get("source")
+            self._device = SimpleNamespace(services={})
+            self.base_uri = "http://192.0.2.10:12345"
+
+        async def async_start(self) -> None:
+            pass
+
+        async def async_stop(self) -> None:
+            pass
+
+    class FakeListener:
+        def __init__(self, **kwargs) -> None:  # noqa: ANN003
+            captured["allowed_ips"] = kwargs.get("allowed_ips")
+
+        def start(self) -> None:
+            pass
+
+        def wait_until_ready(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(server_module, "_patch_upnp_server_skip_ssdp", lambda: None)
+    monkeypatch.setattr(server_module, "make_device_class", lambda *_args: object)
+    monkeypatch.setattr(server_module, "UpnpServer", UpnpServer)
+    monkeypatch.setattr(server_module, "SsdpListener", FakeListener)
+    monkeypatch.setattr(server_module, "get_local_ip", lambda: "192.0.2.10")
+
+    # 默认（关闭）：绑全部网卡，SSDP 不做网卡过滤
+    server = DlnaServer(Bridge(), Config())  # type: ignore[arg-type]
+    asyncio.run(server.async_start())
+    assert captured["source"] == ("0.0.0.0", 1900)
+    assert captured["allowed_ips"] is None
+
+    # 开启：HTTP 只绑默认网卡 IP，SSDP 宣告白名单同步收窄
+    captured.clear()
+    cfg = Config()
+    cfg.values["bind_default_interface_only"] = True
+    server = DlnaServer(Bridge(), cfg)  # type: ignore[arg-type]
+    asyncio.run(server.async_start())
+    assert captured["source"] == ("192.0.2.10", 1900)
+    assert captured["allowed_ips"] == ["192.0.2.10"]
