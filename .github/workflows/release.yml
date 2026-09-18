@@ -6,8 +6,8 @@ name: Build & Release
 #   3. 手动触发（workflow_dispatch）→ 非 tag ref 只构建，产物挂在本条
 #      run 的 Artifacts 里（方便发布前试包）
 # 所有 uses 引用都钉死完整 commit SHA（浮动 tag 可被重定向利用，
-# CODE_REVIEW M17）；升级 action 时必须有意识地更换 SHA 并同步
-# tests/test_release_workflow.py 的钉 SHA 回归测试。
+# CODE_REVIEW M17）；升级 action 时必须有意识地更换 SHA（新 SHA 是否
+# 可信由 PR review 确认），并确保钉 SHA 回归测试继续通过。
 
 on:
   pull_request:
