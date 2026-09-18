@@ -128,6 +128,26 @@ def _connect_shutdown_requests(
     return quit_gate
 
 
+def _show_libmpv_missing_dialog() -> None:
+    """libmpv 不可用的致命错误提示（阻塞直到用户确认）。
+
+    必须用 Qt 原生无 parent QMessageBox：qfluentwidgets MessageBox 继承
+    MaskDialogBase，构造即取 ``parent.width()``——parent=None 会直接
+    AttributeError，错误提示本身弹不出来、应用带着崩溃报告退出
+    （0.1.29~0.1.32 的用户实机踩中：安装包被误打入 32 位 libmpv 后，
+    用户看到的不是可读原因而是 PyInstaller 崩溃窗）。
+    """
+    from PySide6.QtWidgets import QMessageBox
+    from .i18n import tr
+
+    QMessageBox(
+        QMessageBox.Icon.Critical,
+        tr("dialog.dll_missing.title"),
+        tr("dialog.dll_missing.body") + "\n\n" + tr("dialog.dll_missing.detail"),
+        QMessageBox.StandardButton.Ok,
+    ).exec()
+
+
 async def run() -> int:
     """主协程。在 qasync 的 QEventLoop 中运行。"""
     from PySide6.QtWidgets import QApplication
@@ -151,17 +171,7 @@ async def run() -> int:
     # libmpv 缺失检测
     if not is_available():
         log.error("libmpv 不可用")
-        from PySide6.QtWidgets import QMessageBox
-        from .i18n import tr
-        # qfluentwidgets MessageBox 继承 MaskDialogBase，构造即取
-        # parent.width()——parent 传 None 会 AttributeError，错误提示
-        # 本身弹不出来（应用直接崩）。致命错误对话框用 Qt 原生
-        # 无 parent QMessageBox（合法），与 updater 的提示框同模式。
-        QMessageBox(
-            QMessageBox.Icon.Critical,
-            tr("dialog.dll_missing.title"),
-            tr("dialog.dll_missing.body") + "\n\n" + tr("dialog.dll_missing.detail"),
-        ).exec()
+        _show_libmpv_missing_dialog()
         return 1
 
     # 核心组件

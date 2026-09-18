@@ -1,0 +1,42 @@
+name: Release pipeline dry-run
+
+# 修改发布链路（release.yml / fetch_libmpv.ps1）的 PR 必须先实际执行一次
+# libmpv 下载 + x64 PE 校验 + 64 位 Python 加载验证——0.1.29~0.1.32 的
+# i686 误选事故说明：发布产物本身必须在发布前真实验证，仅靠文本断言
+# 和 skipped 的 build job 挡不住。
+# 正式打包（PyInstaller / 安装包）仍只在 master/tag 的 release.yml 中执行。
+# workflow_dispatch 可在任意分支手动触发（发布前预演）。
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-dryrun.yml"
+      - "tools/fetch_libmpv.ps1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  libmpv-fetch-and-validate:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Fetch and validate libmpv
+        shell: pwsh
+        run: ./tools/fetch_libmpv.ps1
+
+      # PE 头校验之上的最终证明：目标运行时（64 位 Python）真实加载
+      - name: Load libmpv with 64-bit Python
+        shell: pwsh
+        run: |
+          python -c "import ctypes; d = ctypes.CDLL('bin/libmpv-2.dll'); print('x64 libmpv 加载成功:', d)"
+          if ($LASTEXITCODE -ne 0) { throw 'libmpv-2.dll 无法被 64 位 Python 加载' }
