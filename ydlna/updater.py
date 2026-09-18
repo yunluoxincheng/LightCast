@@ -63,16 +63,79 @@ class UpdateInfo:
     sums_url: str = ""
 
 
+_VERSION_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?")
+
+# 严格 SemVer 2.0 precedence 文法（容忍 v 前缀），仅用于 _release_key
+# 与远端 tag 门禁；canonical_version 的安全剥离走宽松的 _VERSION_RE。
+# 主版本数字限 64 位以内：真实版本号远短于此，超长即视为无法解析，
+# 同时避免任意长度数字触发 CPython int 转换位数上限。
+_SEMVER_RE = re.compile(
+    r"v?(0|[1-9]\d{0,63})\.(0|[1-9]\d{0,63})\.(0|[1-9]\d{0,63})"
+    r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+
+
 def parse_version(text: str) -> tuple[int, int, int]:
-    """解析 "v0.1.2" / "0.1.2" → (0, 1, 2)；无法解析返回 (0,0,0)。"""
-    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", text or "")
+    """解析 "v0.1.2" / "0.1.2" → (0, 1, 2)；无法解析返回 (0,0,0)。
+
+    预发布后缀不进入本函数结果：数字三元组供 canonical_version 生成
+    安全的下载文件名；后缀的比较语义由 _release_key 处理。
+    """
+    m = _VERSION_RE.match(text or "")
     if not m:
         return (0, 0, 0)
-    return tuple(int(x) for x in m.groups())  # type: ignore[return-value]
+    return tuple(int(x) for x in m.groups()[:3])  # type: ignore[return-value]
+
+
+def _numeric_id_key(part: str) -> tuple[int, int, str]:
+    """数字标识符的比较键：有效位数 + 去前导零后的数字串。
+
+    位数多者大；位数相同按字典序即数值序。不用 int()，任意长度都不会
+    触发 CPython 的 int 字符串转换位数上限。
+    """
+    normalized = part.lstrip("0") or "0"
+    return (0, len(normalized), normalized)
+
+
+def _identifier_key(part: str) -> tuple[int, int, str]:
+    """SemVer 标识符比较键：数字标识 < 字母数字标识，数字按数值比较。"""
+    if part.isdigit():
+        return _numeric_id_key(part)
+    return (1, 0, part)
+
+
+def _release_key(text: str) -> tuple[tuple[int, int, int], int, tuple] | None:
+    """可比较的版本键：数字三元组 + 正式版标志 + 预发布标识段。
+
+    正式版标志为 1、预发布为 0，使同数字段的正式版天然大于任何预发布
+    ——修复 M9：跑 "1.2.3-rc1" 的用户必须能收到正式版 "1.2.3" 更新。
+    用严格 SemVer fullmatch 解析：预发布标识区分大小写、逐段比较，
+    数字标识按数值比较且低于字母数字标识（_identifier_key 编码成同
+    形状三元组，不跨类型比较）；+build 构建元数据不参与 precedence；
+    版本后携带任何非法字符（如 "1.2.4whatever"）都视为无法解析。
+    解析失败返回 None，由调用方决定非法输入的语义。
+    """
+    m = _SEMVER_RE.fullmatch(text or "")
+    if not m:
+        return None
+    triple = tuple(int(x) for x in m.groups()[:3])
+    suffix = m.group(4)
+    if not suffix:
+        return (triple, 1, ())  # type: ignore[return-value]
+    return (triple, 0, tuple(_identifier_key(p) for p in suffix.split(".")))  # type: ignore[return-value]
 
 
 def is_newer(remote: str, current: str) -> bool:
-    return parse_version(remote) > parse_version(current)
+    """远端无法解析时一律 False——绝不基于无法理解的远端版本提示更新；
+    本地无法解析时沿用旧实现的 (0,0,0) 数字段参与比较。"""
+    remote_key = _release_key(remote)
+    if remote_key is None:
+        return False
+    current_key = _release_key(current)
+    if current_key is None:
+        current_key = ((0, 0, 0), 1, ())
+    return remote_key > current_key
 
 
 def canonical_version(tag: str) -> str:
@@ -100,8 +163,12 @@ async def check_for_update() -> Optional[UpdateInfo]:
                 raise RuntimeError(f"GitHub API 返回 HTTP {resp.status}")
             data = await resp.json()
     tag = data.get("tag_name", "") or ""
+    # 远端 tag 必须是严格 SemVer 形式：canonical_version 只负责把已验证
+    # 的 tag 安全化成下载文件名，不能把任意垃圾折叠成 0.0.0 继续走更新流。
+    if not _SEMVER_RE.fullmatch(tag):
+        raise RuntimeError(f"GitHub 最新 Release 的 tag 无法解析: {tag!r}")
     version = canonical_version(tag)
-    if not is_newer(version, __version__):
+    if not is_newer(tag, __version__):
         return None
     assets = {
         a.get("name", ""): a.get("browser_download_url", "")
