@@ -11,6 +11,15 @@
 - 条目
 ```
 
+## [0.1.29] - 2026-09-18
+
+### 修复
+- 修复主页通知 `show_info` 一调用就会崩溃、且警告图标从未生效的问题：qfluentwidgets 没有 `InfoBar.show` 类方法，旧写法会落到继承的 `QWidget.show` 并因多余参数抛 `TypeError`；现改用公开入口 `InfoBar.new` 并把 WARNING / INFORMATION 图标真正传入，警告与普通信息提示视觉可区分。
+- 播放结束回到 idle 状态时，系统托盘 tooltip 会从「正在播放：xxx」复位为默认的「轻投 投屏接收器」，不再永久残留上一次播放的标题；暂停期间 tooltip 保持媒体信息，新媒体开始播放后恢复「正在播放」文案。
+
+### 测试
+- 新增主页 InfoBar 通知回归测试（stub 层锁定 icon 参数与公开入口、真实 qfluentwidgets 子进程验证 `InfoBar.new` 接受 icon 关键字与参数落位）与托盘 tooltip 状态复位测试（真实 QSystemTrayIcon 子进程验证 mediaChanged 设置、暂停保持与 idle 复位时序）；Windows CI 测试总数增至 200 项。
+
 ## [0.1.28] - 2026-08-29
 
 ### 新增

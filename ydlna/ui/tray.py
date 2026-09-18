@@ -72,6 +72,9 @@ class TrayIcon(QSystemTrayIcon):
             self.actPlayPause.setIcon(icon)
         except Exception:  # noqa: BLE001
             pass
+        if state == "idle":
+            # 播放结束后复位 tooltip，避免一直显示上一部的「正在播放: xxx」
+            self.setToolTip(tr("tray.tooltip.idle"))
 
     def _on_media_changed(self, title: str, url: str) -> None:
         self.setToolTip(tr("tray.tooltip.playing", title=title or tr("player.unknown_title")))

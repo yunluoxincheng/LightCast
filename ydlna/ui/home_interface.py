@@ -174,7 +174,10 @@ class HomeInterface(QWidget):
 
     def show_info(self, title: str, body: str, is_warning: bool = False) -> None:
         kind = InfoBarIcon.WARNING if is_warning else InfoBarIcon.INFORMATION
-        InfoBar.show(
+        # qfluentwidgets 没有 InfoBar.show 类方法（该写法会落到 QWidget.show
+        # 并因多余参数抛 TypeError），创建 InfoBar 的公开入口是 InfoBar.new。
+        InfoBar.new(
+            icon=kind,
             title=title,
             content=body,
             orient=Qt.Horizontal,
