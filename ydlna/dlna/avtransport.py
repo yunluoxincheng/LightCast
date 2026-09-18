@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from async_upnp_client.client import UpnpStateVariable
 from async_upnp_client.const import ServiceInfo
+from async_upnp_client.exceptions import UpnpActionError
 from async_upnp_client.server import (
     UpnpServerService,
     callable_action,
@@ -27,6 +28,20 @@ if TYPE_CHECKING:
     from .renderer_bridge import RendererBridge
 
 log = get_logger("dlna.avt")
+
+
+def _require_bridge(bridge: "RendererBridge | None", action: str) -> "RendererBridge":
+    """fail-closed：Bridge 未装配时状态变更类 action 一律 SOAP fault。
+
+    正常运行下 Bridge 在服务启动后立即注入；若未来库升级或装配异常导致
+    缺失，绝不能退回「SOAP 写接口仍然开放」的半失效状态。
+    """
+    if bridge is None:
+        log.error("%s 被拒绝：RendererBridge 未装配", action)
+        raise UpnpActionError(
+            error_desc="服务未就绪", message="bridge not available"
+        )
+    return bridge
 
 
 def _seconds_to_str(seconds: float | None) -> str:
@@ -127,15 +142,11 @@ class AVTransportService(UpnpServerService):
         CurrentURIMetaData: str = "",  # pylint: disable=invalid-name
     ) -> dict[str, UpnpStateVariable]:
         log.info("SetAVTransportURI: %s", CurrentURI)
-        if self.bridge is not None:
-            # RendererBridge 负责把 URI/meta、代理切换、Player.play 和状态提交
-            # 作为同一个串行事务处理，失败时可恢复上一份已提交媒体身份。
-            await self.bridge.on_set_uri(CurrentURI, CurrentURIMetaData or "")
-        else:
-            # 无 bridge 的退化路径仍保持 service 自身可用。
-            self.state_variable("AVTransportURI").value = CurrentURI
-            self.state_variable("AVTransportURIMetaData").value = CurrentURIMetaData or ""
-            self.state_variable("TransportState").value = "STOPPED"
+        # RendererBridge 负责把 URI/meta、代理切换、Player.play 和状态提交
+        # 作为同一个串行事务处理，失败时可恢复上一份已提交媒体身份。
+        # fail-closed：bridge 缺失时不保留旧的"直接写 service 状态"降级路径。
+        bridge = _require_bridge(self.bridge, "SetAVTransportURI")
+        await bridge.on_set_uri(CurrentURI, CurrentURIMetaData or "")
         return {}
 
     @callable_action(
@@ -154,6 +165,10 @@ class AVTransportService(UpnpServerService):
         NextURIMetaData: str = "",  # pylint: disable=invalid-name
     ) -> dict[str, UpnpStateVariable]:
         log.info("SetNextAVTransportURI: %s", NextURI)
+        # NextAVTransportURI(-MetaData) 是 evented 状态变量，与 SetURI 一样
+        # 必须先过控制点授权再写入（三审补上的遗漏）。
+        bridge = _require_bridge(self.bridge, "SetNextAVTransportURI")
+        bridge.ensure_authorized_controller("SetNextAVTransportURI")
         self.state_variable("NextAVTransportURI").value = NextURI
         self.state_variable("NextAVTransportURIMetaData").value = NextURIMetaData or ""
         return {}
@@ -170,8 +185,7 @@ class AVTransportService(UpnpServerService):
         self, InstanceID: int, Speed: str = "1"  # pylint: disable=invalid-name
     ) -> dict[str, UpnpStateVariable]:
         log.info("Play (speed=%s)", Speed)
-        if self.bridge is not None:
-            self.bridge.on_play()
+        _require_bridge(self.bridge, "Play").on_play()
         return {}
 
     @callable_action(
@@ -181,8 +195,7 @@ class AVTransportService(UpnpServerService):
     )
     async def pause(self, InstanceID: int) -> dict[str, UpnpStateVariable]:  # noqa: ANN001  # pylint: disable=invalid-name
         log.info("Pause")
-        if self.bridge is not None:
-            self.bridge.on_pause()
+        _require_bridge(self.bridge, "Pause").on_pause()
         return {}
 
     @callable_action(
@@ -192,8 +205,7 @@ class AVTransportService(UpnpServerService):
     )
     async def stop(self, InstanceID: int) -> dict[str, UpnpStateVariable]:  # noqa: ANN001  # pylint: disable=invalid-name
         log.info("Stop")
-        if self.bridge is not None:
-            self.bridge.on_stop()
+        _require_bridge(self.bridge, "Stop").on_stop()
         return {}
 
     @callable_action(
@@ -212,8 +224,7 @@ class AVTransportService(UpnpServerService):
         Target: str,  # pylint: disable=invalid-name
     ) -> dict[str, UpnpStateVariable]:
         log.info("Seek: unit=%s target=%s", Unit, Target)
-        if self.bridge is not None:
-            self.bridge.on_seek(Unit, Target)
+        _require_bridge(self.bridge, "Seek").on_seek(Unit, Target)
         return {}
 
     @callable_action(

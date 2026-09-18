@@ -11,6 +11,24 @@
 - 条目
 ```
 
+## [0.1.28] - 2026-08-29
+
+### 新增
+- 建立控制点授权与投屏确认（默认开启）：从 SOAP 控制请求取真实控制点地址，首次来自新设备的投屏弹窗询问并自动唤起主窗口，确认后该设备本次运行内的投屏与播放控制均被放行；30 秒未确认自动拒绝并以 InfoBar 提示。可在设置中关闭「投屏需本机确认」。
+- 新增「仅通过默认网卡投屏」开关（默认关闭，重启投屏服务后生效）：开启后投屏服务的 HTTP/SOAP 只监听默认网卡地址，SSDP 宣告、多播加入与 M-SEARCH 应答全部限制在该网卡白名单内，白名单子网外的 M-SEARCH 直接忽略；多网卡 / 虚拟网卡 / 热点环境下设备不再向其他网卡暴露。
+
+### 安全
+- 授权是任何状态变更的第一道门槛：`SetAVTransportURI` 在通过 scheme/SSRF 校验与用户确认之前不向 service 写入任何 evented 状态，候选 URI 不会在确认弹窗期间经 GENA 暴露给其他订阅者；`RenderingControl` 的 SetVolume/SetMute 也改为先授权、后写状态。
+- 授权覆盖全部改变播放状态的 SOAP action（SetAVTransportURI / SetNextAVTransportURI / Play / Pause / Stop / Seek / SetVolume / SetMute）：未授权或无法识别的控制点一律以 SOAP fault 拒绝（含 SetAVTransportURI——控制点不会误以为投屏已被接受），无法再在未经本机确认的情况下暂停、停止播放、任意 Seek、把音量调满 / 静音或篡改下一个待播媒体。
+- 收紧装配异常下的失效模式：`RendererBridge` 未装配时状态变更类 action 一律 fail-closed（不再保留直接写 service 状态的降级路径），`DlnaServer` 启动时找不到全部三个 service 会直接启动失败，杜绝「安全组件未装配但 SOAP 写接口仍开放」的半失效状态。
+- 授权身份使用真实控制点 IP（aiohttp peer address），不再以媒体 URL 域名冒充设备身份：不同设备即使投递同一 CDN / NAS 域名也必须分别确认，杜绝授权串用；控制点上下文缺失或确认门控未装配时一律 fail-closed 拒绝。
+- 修复静音状态从未同步到 DLNA 服务的存量缺陷：`Mute` 状态变量是 boolean 类型，旧代码写入 `"1"/"0"` 字符串会被库 schema 拒绝并静默吞掉，现统一写真实布尔值。
+- 加固自动更新：release tag 先经 `canonical_version` 规范成 `X.Y.Z` 数字段再拼下载文件名；写盘前校验最终路径必须位于下载目录内（`_validated_download_dest`），杜绝畸形 tag 或路径分量触发目录穿越。
+- README 新增「公共 Wi-Fi 下的投屏安全」说明（DLNA 协议无鉴权的风险与两项缓解开关的用法）；源码运行的 Python 版本下限由 3.10 更正为 3.11（代码使用了 3.11 才有的 `asyncio.TaskGroup`）。
+
+### 测试
+- 新增 service 层与 bridge 层授权回归测试（真实 service action 验证未授权 SetVolume/SetMute/SetURI/SetNextURI 状态零副作用、确认期间候选 URI 不发布、跨控制点授权串用——不同设备投同一域名需分别确认、未授权 / 未知控制点的播放控制拒绝、bridge 缺失时状态写 action fail-closed、SSRF 拦截不触发弹窗、SOAP 请求上下文隔离与复位）、下载目标目录包含校验的逃逸回归测试、网卡白名单过滤与白名单外 M-SEARCH 忽略、HTTP 绑定地址与 SSDP 宣告白名单随配置切换；Windows CI 测试总数增至 197 项。
+
 ## [0.1.27] - 2026-08-21
 
 ### 修复

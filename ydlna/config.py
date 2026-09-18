@@ -47,6 +47,14 @@ DEFAULTS: dict[str, Any] = {
     # 任意可达的 RFC1918 / ULA 地址（含路由器、VPN、虚拟网卡网络）均可作为媒体源；
     # 关闭后进入拒绝私网的严格模式。loopback/link-local/云元数据等地址始终拦截。
     "allow_intranet_cast": True,
+    # 收到投屏请求是否需要本机确认。默认开：DLNA 协议无鉴权，同一网络内任何设备
+    # 都能直接投屏；首次来自新来源主机（按投屏 URL 的 host 识别）的请求会弹窗
+    # 询问，同一来源本次运行内确认过一次后不再打扰。关闭后任何设备都可直接投屏。
+    "require_cast_confirm": True,
+    # 投屏服务是否只通过默认网卡提供（HTTP/SOAP 监听与 SSDP 宣告都只走
+    # get_local_ip() 所在网卡）。默认关：保持绑定全部网卡的兼容行为；开启后在
+    # 多网卡 / 虚拟网卡 / 热点环境下收窄设备的暴露面。重启投屏服务后生效。
+    "bind_default_interface_only": False,
 }
 
 
