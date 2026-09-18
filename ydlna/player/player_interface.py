@@ -104,7 +104,20 @@ class _Spinner(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(30)
         self._timer.timeout.connect(self._advance)
-        self._timer.start()
+        # 旋转定时器只在本控件可见时运行（M8 省电）：BufferingOverlay
+        # 构造即隐藏，若无条件 start，30ms 重绘定时器会永不停止地唤醒
+        # 主线程。启停由 showEvent / hideEvent 驱动（父级显隐会级联下发
+        # 子控件事件）。
+
+    def showEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().showEvent(event)
+        # isVisible 门控：祖先尚未可见时 show() 不算真正上屏，不启动
+        if self.isVisible() and not self._timer.isActive():
+            self._timer.start()
+
+    def hideEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().hideEvent(event)
+        self._timer.stop()
 
     def _advance(self) -> None:
         self._angle = (self._angle + self._STEP) % 360
@@ -263,11 +276,12 @@ class PlayerInterface(QWidget):
 
         # 持续锚定定时器：事件驱动定位有盲区（窗口移动、页面切换时的瞬态
         # 布局都不会触发重新定位，控制栏会停留在旧位置甚至窗口外），
-        # 这里周期刷新，保证控制栏始终贴住页面底部
+        # 这里周期刷新，保证控制栏始终贴住页面底部。
+        # 只在页面可见时运行（M8 省电）：启停由页面 showEvent / hideEvent
+        # 驱动，构造期不 start——页面默认不在前台，150ms 定时器不应空转。
         self._anchor_timer = QTimer(self)
         self._anchor_timer.setInterval(150)
         self._anchor_timer.timeout.connect(self._reanchor)
-        self._anchor_timer.start()
 
     def _build_empty(self, parent) -> QWidget:  # noqa: ANN001
         w = QWidget(parent)
@@ -302,6 +316,11 @@ class PlayerInterface(QWidget):
     # ------------------------------------------------------------------ #
     def showEvent(self, event) -> None:  # noqa: N802, ANN001
         super().showEvent(event)
+        # 页面回到前台才恢复 150ms 锚定刷新（M8 省电：隐藏页不停表）。
+        # isVisible 门控：祖先窗口仍隐藏时 showEvent 也会触发（开机自启
+        # 静默模式会切到播放器页但不显示主窗口），此时不算真正上屏。
+        if self.isVisible() and not self._anchor_timer.isActive():
+            self._anchor_timer.start()
         # 延迟到布局完成后恢复渲染区 + attach
         QTimer.singleShot(0, self._on_page_shown)
 
@@ -312,6 +331,8 @@ class PlayerInterface(QWidget):
         self.floatingBar.hide()
         self.embeddedBar.hide()
         self._set_cursor_visible(True)
+        # 页面不可见期间停止锚定刷新（M8 省电）
+        self._anchor_timer.stop()
 
     def _on_page_shown(self) -> None:
         # 页面隐藏时直接返回：showEvent 的延迟回调可能在切回其它页后才执行
