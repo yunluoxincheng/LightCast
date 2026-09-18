@@ -296,14 +296,14 @@
 ### M15. 托盘 tooltip 不复位
 
 - **文件**：`ydlna/ui/tray.py`（`_on_state_changed`）
-- **状态**：`[ ]`
+- **状态**：`[x]` 已修复（2026-09-18）：`stateChanged` 到 `idle` 时把 tooltip 复位为 `tray.tooltip.idle`；暂停期间保持「正在播放」文案，新媒体开始后经 `mediaChanged` 恢复。新增真实 QSystemTrayIcon 子进程回归测试覆盖设置、暂停保持与 idle 复位时序。
 - **问题**：播放结束后 tooltip 仍显示「正在播放: xxx」，只在 `_retranslate` 里按 idle 复位。
 - **建议**：`_on_state_changed` 里 state==idle 时复位 tooltip。
 
 ### M16. `home_interface.show_info` 的 `is_warning` 参数失效（实打实 bug）
 
 - **文件**：`ydlna/ui/home_interface.py:175-185`
-- **状态**：`[ ]`
+- **状态**：`[x]` 已修复（2026-09-18）：实际核实比审查结论更严重——qfluentwidgets 没有 `InfoBar.show` 类方法，旧写法会解析到继承的 `QWidget.show` 并因多余参数抛 `TypeError`，该方法一调用就崩溃且当前无任何调用点。已改用公开入口 `InfoBar.new(icon=kind, ...)`，WARNING / INFORMATION 图标真正传入。新增 stub 层测试锁定 icon 参数与公开入口，并以真实 qfluentwidgets 子进程测试验证 `InfoBar.new` 接受 icon 关键字与参数落位。
 - **问题**：计算了 `kind = InfoBarIcon.WARNING if is_warning else InfoBarIcon.INFORMATION`，但
     **没传给 `InfoBar.show`**，警告与信息提示视觉无差别。
 - **建议**：`InfoBar.show(..., icon=kind, ...)`。
