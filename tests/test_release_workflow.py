@@ -1,7 +1,17 @@
+import re
 from pathlib import Path
 
 
 WORKFLOW = Path(".github/workflows/release.yml")
+
+# 评审 M17：浮动版本 tag（如 @v5）可被重定向利用，所有 uses 引用必须
+# 钉死完整 40 位 commit SHA；已知的具体 action 名在此锁定，防止删掉
+# 现有 action 后测试因集合为空而静默通过。
+_EXPECTED_ACTIONS = {
+    "actions/checkout",
+    "actions/setup-python",
+    "actions/upload-artifact",
+}
 
 
 def test_remote_state_is_read_inside_serialized_build_job() -> None:
@@ -29,3 +39,24 @@ def test_publish_paths_verify_existing_tag_and_recover_drafts() -> None:
     assert workflow.count("--verify-tag") >= 2
     assert verify_step < create_release
     assert verify_step < recover_draft
+
+
+def test_all_actions_are_pinned_to_full_commit_sha() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    refs = re.findall(r"uses:\s*(\S+)", workflow)
+
+    assert refs, "workflow 中未找到任何 uses 引用"
+    actions = set()
+    for ref in refs:
+        action, _, version = ref.partition("@")
+        assert action and version, f"uses 引用缺少版本: {ref}"
+        assert re.fullmatch(r"[0-9a-f]{40}", version), (
+            f"{ref} 未钉住完整 commit SHA（当前版本段: {version}），"
+            "浮动 tag 可被重定向利用"
+        )
+        actions.add(action)
+
+    assert actions == _EXPECTED_ACTIONS, (
+        f"workflow 的 action 集合变化: {sorted(actions)}；"
+        "新增 action 必须同样钉 SHA 并更新 _EXPECTED_ACTIONS"
+    )
