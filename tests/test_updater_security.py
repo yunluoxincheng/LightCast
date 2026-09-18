@@ -56,9 +56,17 @@ def test_is_newer(remote: str, current: str, expected: bool) -> None:
         ("0.0.0", "garbage", False),
         ("garbage", "garbage", False),
         ("1.2.3", "garbage", True),
-        # 超长纯数字预发布标识不触发 int 转换位数上限（ValueError）
+        # 超长纯数字预发布标识不触发 int 转换位数上限，且仍按数值比较
         ("1.2.3-" + "9" * 5000, "1.2.3", False),
         ("1.2.4", "1.2.3-" + "9" * 5000, True),
+        # 65 位 vs 66 位：位数多者数值大，不会因超长被降级成字符串比较
+        ("1.2.3-" + "9" * 65, "1.2.3-" + "1" * 66, False),
+        ("1.2.3-" + "1" * 66, "1.2.3-" + "9" * 65, True),
+        # SemVer：任意长度的数字标识都低于字母数字标识
+        ("1.2.3-" + "9" * 65, "1.2.3-1a", False),
+        ("1.2.3-1a", "1.2.3-" + "9" * 65, True),
+        # 严格 SemVer 解析：版本后携带垃圾字符视为无法解析的远端 → False
+        ("1.2.4whatever", "1.2.3", False),
     ],
 )
 def test_is_newer_with_prerelease_suffix(
