@@ -11,6 +11,15 @@
 - 条目
 ```
 
+## [0.1.33] - 2026-09-19
+
+### 修复
+- 修复 v0.1.29 ~ v0.1.32 的安装包/便携包内置了 32 位（i686）`libmpv-2.dll`，导致全新安装后应用启动即报「libmpv 不可用」的问题：SourceForge 于 8 月 30 日上传的 i686 构建比此前的 x86_64 构建更新，发布脚本的「取最新且不含 v3」选择逻辑将其误选（PE 架构确认 x86，64 位进程加载报 WinError 193）。现在 RSS 选择强制限定 `x86_64`，解压后再读取 PE 头校验 `machine=0x8664`，非 x64 构建直接使构建失败。受影响的用户请重新安装本版本。
+- 修复 libmpv 不可用时致命错误对话框自身崩溃的问题：qfluentwidgets `MessageBox` 的 parent 传 `None` 会在构造时因 `parent.width()` 抛 `AttributeError`（`MaskDialogBase` 要求非空 parent），错误提示弹不出来、应用直接带着崩溃报告退出；现改用 Qt 原生无 parent `QMessageBox`，用户能看到可读的错误说明。
+
+### 测试
+- 新增发布工作流回归测试（libmpv 下载必须限定 x86_64、解压后必须有 PE 架构校验步骤）与致命对话框回归测试（真实 Qt 子进程验证原生无 parent `QMessageBox` 可构造，并复现 qfluentwidgets `MessageBox(None)` 的崩溃根因）；Windows CI 测试总数增至 240 项。
+
 ## [0.1.32] - 2026-09-18
 
 ### 修复

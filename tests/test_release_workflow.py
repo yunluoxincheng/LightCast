@@ -60,3 +60,18 @@ def test_all_actions_are_pinned_to_full_commit_sha() -> None:
         f"workflow 的 action 集合变化: {sorted(actions)}；"
         "新增 action 必须同样钉 SHA 并更新 _EXPECTED_ACTIONS"
     )
+
+
+def test_libmpv_download_requires_x86_64_and_validates_pe_machine() -> None:
+    """libmpv 下载必须限定 x86_64 且解压后校验 PE 架构。
+
+    0.1.29~0.1.32 曾因 RSS 里 i686 构建更新被「仅排除 v3」的逻辑误选，
+    安装包内置 32 位 dll，用户机器上启动即「libmpv 不可用」。
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    section = workflow[workflow.index("Download libmpv-2.dll"):]
+
+    assert "$title -like '*x86_64*'" in section, "RSS 选择必须限定 x86_64"
+    assert "未找到 x86_64 的 .7z 包" in section
+    assert "0x8664" in section, "解压后必须校验 PE machine=0x8664"
+    assert "不是 x64 PE" in section, "非 x64 构建必须使构建失败"

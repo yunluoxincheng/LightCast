@@ -233,7 +233,9 @@ jobs:
 
       # libmpv-2.dll（约 110MB，不纳入仓库）：从 SourceForge 的 libmpv 目录
       # 拉 RSS 取最新一个 dev 构建包，解压出 dll 放到 bin/
-      # 注意：优先标准版（非 v3），v3 精简版不含独立 dll
+      # 注意：必须选 x86_64 且优先非 v3——RSS 里 i686 / ARM64 构建更新时
+      # 只按「不含 v3」筛会误选（0.1.29~0.1.32 曾因此内置 32 位 dll，
+      # 用户机器上启动即「libmpv 不可用」）；解压后再校验 PE 头兜底
       - name: Download libmpv-2.dll
         if: steps.state.outputs.should_build == 'true'
         shell: pwsh
@@ -244,12 +246,12 @@ jobs:
           $chosen = $null
           foreach ($it in $items) {
             $title = $it.SelectSingleNode('title').InnerText
-            if ($title -like '*.7z') {
+            if ($title -like '*.7z' -and $title -like '*x86_64*') {
               if ($title -notlike '*v3*') { $chosen = $it; break }
               if (-not $chosen) { $chosen = $it }
             }
           }
-          if (-not $chosen) { throw 'SourceForge libmpv 目录未找到 .7z 包' }
+          if (-not $chosen) { throw 'SourceForge libmpv 目录未找到 x86_64 的 .7z 包' }
           $title = $chosen.SelectSingleNode('title').InnerText
           $url = $chosen.SelectSingleNode('link').InnerText
           Write-Host "下载: $title"
@@ -257,6 +259,19 @@ jobs:
           if (-not (Test-Path 'libmpv.7z')) { throw 'libmpv.7z 下载失败' }
           & 'C:\Program Files\7-Zip\7z.exe' e libmpv.7z "-obin" libmpv-2.dll -y
           if (-not (Test-Path 'bin\libmpv-2.dll')) { throw '解压后未找到 libmpv-2.dll' }
+          # PE 头兜底校验：machine 必须是 0x8664（x64），防止误选的
+          # 非 x64 构建流入安装包（文件存在不等于可加载）
+          $fs = [System.IO.File]::OpenRead('bin\libmpv-2.dll')
+          try {
+            $head = New-Object byte[] 4096
+            [void]$fs.Read($head, 0, 4096)
+          } finally { $fs.Close() }
+          $peOffset = [BitConverter]::ToInt32($head, 0x3C)
+          $machine = [BitConverter]::ToUInt16($head, $peOffset + 4)
+          if ($machine -ne 0x8664) {
+            throw "libmpv-2.dll 不是 x64 PE（machine=0x$($machine.ToString('X4'))），拒绝打包"
+          }
+          Write-Host "libmpv-2.dll 架构校验通过（x64）"
 
       # 让「关于」页的版本号与 Release 标签一致
       - name: Sync app version

@@ -151,16 +151,17 @@ async def run() -> int:
     # libmpv 缺失检测
     if not is_available():
         log.error("libmpv 不可用")
-        from qfluentwidgets import MessageBox
+        from PySide6.QtWidgets import QMessageBox
         from .i18n import tr
-        box = MessageBox(
+        # qfluentwidgets MessageBox 继承 MaskDialogBase，构造即取
+        # parent.width()——parent 传 None 会 AttributeError，错误提示
+        # 本身弹不出来（应用直接崩）。致命错误对话框用 Qt 原生
+        # 无 parent QMessageBox（合法），与 updater 的提示框同模式。
+        QMessageBox(
+            QMessageBox.Icon.Critical,
             tr("dialog.dll_missing.title"),
             tr("dialog.dll_missing.body") + "\n\n" + tr("dialog.dll_missing.detail"),
-            None,
-        )
-        box.yesButton.setText(tr("common.ok"))
-        box.cancelButton.hide()
-        box.exec()
+        ).exec()
         return 1
 
     # 核心组件
