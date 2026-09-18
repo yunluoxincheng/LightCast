@@ -34,9 +34,10 @@ jobs:
         shell: pwsh
         run: ./tools/fetch_libmpv.ps1
 
-      # PE 头校验之上的最终证明：目标运行时（64 位 Python）真实加载
+      # PE 头校验之上的最终证明：目标运行时（64 位 Python）真实加载。
+      # print 只用 ASCII：CI 控制台是 cp1252，中文会 UnicodeEncodeError
       - name: Load libmpv with 64-bit Python
         shell: pwsh
         run: |
-          python -c "import ctypes; d = ctypes.CDLL('bin/libmpv-2.dll'); print('x64 libmpv 加载成功:', d)"
+          python -c "import ctypes; d = ctypes.CDLL('bin/libmpv-2.dll'); print('x64 libmpv loaded ok:', d)"
           if ($LASTEXITCODE -ne 0) { throw 'libmpv-2.dll 无法被 64 位 Python 加载' }
