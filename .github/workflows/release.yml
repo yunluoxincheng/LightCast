@@ -5,6 +5,9 @@ name: Build & Release
 #   2. 推送 v* 标签（如 v0.1.0）→ 保留手动标签发布能力
 #   3. 手动触发（workflow_dispatch）→ 非 tag ref 只构建，产物挂在本条
 #      run 的 Artifacts 里（方便发布前试包）
+# 所有 uses 引用都钉死完整 commit SHA（浮动 tag 可被重定向利用，
+# CODE_REVIEW M17）；升级 action 时必须有意识地更换 SHA（新 SHA 是否
+# 可信由 PR review 确认），并确保钉 SHA 回归测试继续通过。
 
 on:
   pull_request:
@@ -25,10 +28,10 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
           cache: pip
@@ -51,12 +54,12 @@ jobs:
       tag: ${{ steps.plan.outputs.tag }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
@@ -109,12 +112,12 @@ jobs:
       contents: write # 仅发布 job 可创建标签和 Release
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
           cache: pip
@@ -448,7 +451,7 @@ jobs:
       # 手动触发：不建 Release，产物挂到 run 的 Artifacts 供下载
       - name: Upload artifacts (manual run)
         if: needs.metadata.outputs.mode == 'manual'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: LightCast-${{ needs.metadata.outputs.version }}
           path: |

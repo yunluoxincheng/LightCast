@@ -311,7 +311,7 @@
 ### M17. CI 第三方 Action 未钉 SHA
 
 - **文件**：`.github/workflows/release.yml`
-- **状态**：`[ ]`
+- **状态**：`[x]` 已修复（2026-09-18）：checkout / setup-python / upload-artifact 的全部 7 处 `uses` 引用从浮动 `@v5/@v6/@v4` 钉死为对应 release tag 的完整 commit SHA（v5.1.0 / v6.3.0 / v4.6.2），workflow 头部注明「升级须有意更换 SHA，新 SHA 经 PR review 确认」；新增回归测试强制所有 `uses` 引用保持 40 位 SHA 并锁定 action 集合（不锁具体 SHA——防的是退回浮动 tag，具体 SHA 可信性由 review 把关）。审查建议中的 release job 环境保护 / 手动确认与发布 Goal「合并 master 即发布批准」的既定决策冲突，维持不加。
 - **问题**：`actions/checkout@v5` 等用浮动标签，理论上可被 tag 重指向利用。
 - **建议**：钉 commit SHA；release job 加环境保护 / 手动确认。
 

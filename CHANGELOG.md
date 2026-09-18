@@ -11,6 +11,14 @@
 - 条目
 ```
 
+## [0.1.30] - 2026-09-18
+
+### 安全
+- 发布流水线中全部 `uses` 引用（actions/checkout、actions/setup-python、actions/upload-artifact，共 7 处）从浮动版本 tag 钉死到完整 commit SHA（当前对应 v5.1.0 / v6.3.0 / v4.6.2），杜绝浮动 tag 被重定向后向测试与发布链路注入代码；workflow 头部注明升级须有意更换 SHA 的维护约定。
+
+### 测试
+- 新增 workflow uses 钉 SHA 回归测试：所有 `uses` 引用必须是 40 位完整 commit SHA，且 workflow 的 action 集合被显式锁定，新增 action 若未钉 SHA 会直接失败；Windows CI 测试总数增至 201 项。
+
 ## [0.1.29] - 2026-09-18
 
 ### 修复
