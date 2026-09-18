@@ -42,12 +42,23 @@ def test_is_newer(remote: str, current: str, expected: bool) -> None:
         # 更高的数字段无视预发布属性
         ("1.2.3-rc99", "1.2.4", False),
         ("1.2.4-rc1", "1.2.3", True),
+        # SemVer 标识符区分大小写（ASCII 字典序）
+        ("1.2.3-rc", "1.2.3-RC", True),
+        ("1.2.3-RC", "1.2.3-rc", False),
         # 构建元数据（+build）不影响比较
         ("1.2.3+build.5", "1.2.3", False),
         ("1.2.4+build.5", "1.2.3", True),
-        # 非法输入不抛异常，比较语义与旧实现一致
+        # 非法输入：远端非法一律不提示更新；本地非法沿用旧 (0,0,0) 语义
         ("garbage", "1.2.3-rc1", False),
         ("1.2.3-rc1", "garbage", True),
+        ("garbage", "0.0.0-rc1", False),
+        ("0.0.0-rc1", "garbage", False),
+        ("0.0.0", "garbage", False),
+        ("garbage", "garbage", False),
+        ("1.2.3", "garbage", True),
+        # 超长纯数字预发布标识不触发 int 转换位数上限（ValueError）
+        ("1.2.3-" + "9" * 5000, "1.2.3", False),
+        ("1.2.4", "1.2.3-" + "9" * 5000, True),
     ],
 )
 def test_is_newer_with_prerelease_suffix(
@@ -142,3 +153,88 @@ def test_fetch_sha256_rejects_missing_or_malformed_entry(monkeypatch) -> None:
         )
     )
     assert result is None
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict, status: int = 200) -> None:
+        self.status = status
+        self._payload = payload
+
+    async def json(self) -> dict:
+        return self._payload
+
+
+class _FakeGetContext:
+    def __init__(self, response: _FakeResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _FakeResponse:
+        return self._response
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _FakeSession:
+    """替身 aiohttp.ClientSession：check_for_update 的唯一网络接缝。"""
+
+    def __init__(self, response: _FakeResponse, **_kwargs: object) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> "_FakeSession":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    def get(self, *_args: object, **_kwargs: object) -> _FakeGetContext:
+        return _FakeGetContext(self._response)
+
+
+def _release_payload(tag: str) -> dict:
+    return {
+        "tag_name": tag,
+        "body": "release notes",
+        "published_at": "2026-09-18T00:00:00Z",
+        "assets": [
+            {
+                "name": f"LightCast-Setup-{tag.lstrip('v')}.exe",
+                "browser_download_url": "https://example.com/setup.exe",
+            },
+            {
+                "name": f"LightCast-Portable-{tag.lstrip('v')}.zip",
+                "browser_download_url": "https://example.com/portable.zip",
+            },
+            {
+                "name": "SHA256SUMS.txt",
+                "browser_download_url": "https://example.com/sums.txt",
+            },
+        ],
+    }
+
+
+def _run_check(monkeypatch, tag: str, local_version: str):  # noqa: ANN001, ANN202
+    monkeypatch.setattr(
+        updater.aiohttp, "ClientSession", lambda **kw: _FakeSession(_FakeResponse(_release_payload(tag)))
+    )
+    monkeypatch.setattr(updater, "__version__", local_version)
+    return asyncio.run(updater.check_for_update())
+
+
+def test_check_for_update_offers_stable_to_prerelease_user(monkeypatch) -> None:
+    """M9 真实调用链：本地 0.1.31-rc1 + 远端 v0.1.31 → 提示更新。"""
+    info = _run_check(monkeypatch, "v0.1.31", "0.1.31-rc1")
+    assert info is not None
+    assert info.tag == "v0.1.31"
+    assert info.version == "0.1.31"
+
+
+def test_check_for_update_ignores_older_or_equal_release(monkeypatch) -> None:
+    assert _run_check(monkeypatch, "v0.1.30", "0.1.31-rc1") is None
+    assert _run_check(monkeypatch, "v0.1.31", "0.1.31") is None
+
+
+def test_check_for_update_rejects_unparseable_remote_tag(monkeypatch) -> None:
+    """远端 tag 垃圾时必须显式失败，不能折叠成 0.0.0 走更新流。"""
+    with pytest.raises(RuntimeError):
+        _run_check(monkeypatch, "not-a-version", "0.1.31")

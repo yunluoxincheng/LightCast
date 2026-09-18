@@ -78,31 +78,41 @@ def parse_version(text: str) -> tuple[int, int, int]:
     return tuple(int(x) for x in m.groups()[:3])  # type: ignore[return-value]
 
 
-def _release_key(text: str) -> tuple[tuple[int, int, int], int, tuple]:
+def _release_key(text: str) -> tuple[tuple[int, int, int], int, tuple] | None:
     """可比较的版本键：数字三元组 + 正式版标志 + 预发布标识段。
 
     正式版标志为 1、预发布为 0，使同数字段的正式版天然大于任何预发布
     ——修复 M9：跑 "1.2.3-rc1" 的用户必须能收到正式版 "1.2.3" 更新。
-    每个点分标识符编码为 (0, 数字, "") 或 (1, 0, 字符串)，避免跨类型
-    比较抛 TypeError，并实现 SemVer 的「数字标识符 < 字母数字标识符」
-    与逐段比较。
+    预发布标识按 SemVer 区分大小写并按 "." 逐段比较；每段编码为
+    (0, 数字, "") 或 (1, 0, 字符串)，避免跨类型比较抛 TypeError，并实现
+    「数字标识符 < 字母数字标识符」。无法解析返回 None，由调用方决定
+    非法输入的语义。超过 64 位的纯数字标识按字母数字处理，避免触发
+    CPython 的 int 字符串转换位数上限抛 ValueError。
     """
     m = _VERSION_RE.match(text or "")
     if not m:
-        return ((0, 0, 0), 1, ())
+        return None
     triple = tuple(int(x) for x in m.groups()[:3])
     suffix = m.group(4)
     if not suffix:
         return (triple, 1, ())  # type: ignore[return-value]
     ids = tuple(
-        (0, int(part), "") if part.isdigit() else (1, 0, part)
-        for part in suffix.lower().split(".")
+        (0, int(part), "") if part.isdigit() and len(part) <= 64 else (1, 0, part)
+        for part in suffix.split(".")
     )
     return (triple, 0, ids)  # type: ignore[return-value]
 
 
 def is_newer(remote: str, current: str) -> bool:
-    return _release_key(remote) > _release_key(current)
+    """远端无法解析时一律 False——绝不基于无法理解的远端版本提示更新；
+    本地无法解析时沿用旧实现的 (0,0,0) 数字段参与比较。"""
+    remote_key = _release_key(remote)
+    if remote_key is None:
+        return False
+    current_key = _release_key(current)
+    if current_key is None:
+        current_key = ((0, 0, 0), 1, ())
+    return remote_key > current_key
 
 
 def canonical_version(tag: str) -> str:
@@ -130,8 +140,12 @@ async def check_for_update() -> Optional[UpdateInfo]:
                 raise RuntimeError(f"GitHub API 返回 HTTP {resp.status}")
             data = await resp.json()
     tag = data.get("tag_name", "") or ""
+    # 远端 tag 必须是可解析的版本形式：canonical_version 只负责把已验证
+    # 的 tag 安全化成下载文件名，不能把任意垃圾折叠成 0.0.0 继续走更新流。
+    if not _VERSION_RE.fullmatch(tag):
+        raise RuntimeError(f"GitHub 最新 Release 的 tag 无法解析: {tag!r}")
     version = canonical_version(tag)
-    if not is_newer(version, __version__):
+    if not is_newer(tag, __version__):
         return None
     assets = {
         a.get("name", ""): a.get("browser_download_url", "")
