@@ -22,6 +22,49 @@ def test_is_newer(remote: str, current: str, expected: bool) -> None:
 
 
 @pytest.mark.parametrize(
+    ("remote", "current", "expected"),
+    [
+        # M9：同数字段的正式版必须新于其预发布，rc 用户才能收到正式版
+        ("1.2.3", "1.2.3-rc1", True),
+        ("v1.2.3", "1.2.3-rc1", True),
+        ("1.2.3-rc1", "1.2.3", False),
+        # 预发布之间按后缀逐段比较
+        ("1.2.3-rc2", "1.2.3-rc1", True),
+        ("1.2.3-rc1", "1.2.3-rc2", False),
+        # 点分数字段按数值而非字典序比较：2 < 11
+        ("1.2.3-rc.11", "1.2.3-rc.2", True),
+        ("1.2.3-rc.2", "1.2.3-rc.11", False),
+        # SemVer：数字标识符 < 字母数字标识符；不得抛 TypeError
+        ("1.2.3-beta.1", "1.2.3-alpha.2", True),
+        ("1.2.3-alpha", "1.2.3-beta", False),
+        ("1.2.3-1", "1.2.3-rc", False),
+        ("1.2.3-rc", "1.2.3-1", True),
+        # 更高的数字段无视预发布属性
+        ("1.2.3-rc99", "1.2.4", False),
+        ("1.2.4-rc1", "1.2.3", True),
+        # 构建元数据（+build）不影响比较
+        ("1.2.3+build.5", "1.2.3", False),
+        ("1.2.4+build.5", "1.2.3", True),
+        # 非法输入不抛异常，比较语义与旧实现一致
+        ("garbage", "1.2.3-rc1", False),
+        ("1.2.3-rc1", "garbage", True),
+    ],
+)
+def test_is_newer_with_prerelease_suffix(
+    remote: str, current: str, expected: bool
+) -> None:
+    assert updater.is_newer(remote, current) is expected
+
+
+def test_parse_version_contract_unchanged_for_prerelease() -> None:
+    """parse_version 只出数字段（canonical_version 依赖它做安全文件名）。"""
+    assert updater.parse_version("1.2.3") == (1, 2, 3)
+    assert updater.parse_version("v1.2.3-rc1") == (1, 2, 3)
+    assert updater.parse_version("1.2.3-../../evil") == (1, 2, 3)
+    assert updater.parse_version("garbage") == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
     ("tag", "expected"),
     [
         ("v0.1.28", "0.1.28"),

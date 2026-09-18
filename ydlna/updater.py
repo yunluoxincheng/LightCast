@@ -63,16 +63,46 @@ class UpdateInfo:
     sums_url: str = ""
 
 
+_VERSION_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?")
+
+
 def parse_version(text: str) -> tuple[int, int, int]:
-    """解析 "v0.1.2" / "0.1.2" → (0, 1, 2)；无法解析返回 (0,0,0)。"""
-    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", text or "")
+    """解析 "v0.1.2" / "0.1.2" → (0, 1, 2)；无法解析返回 (0,0,0)。
+
+    预发布后缀不进入本函数结果：数字三元组供 canonical_version 生成
+    安全的下载文件名；后缀的比较语义由 _release_key 处理。
+    """
+    m = _VERSION_RE.match(text or "")
     if not m:
         return (0, 0, 0)
-    return tuple(int(x) for x in m.groups())  # type: ignore[return-value]
+    return tuple(int(x) for x in m.groups()[:3])  # type: ignore[return-value]
+
+
+def _release_key(text: str) -> tuple[tuple[int, int, int], int, tuple]:
+    """可比较的版本键：数字三元组 + 正式版标志 + 预发布标识段。
+
+    正式版标志为 1、预发布为 0，使同数字段的正式版天然大于任何预发布
+    ——修复 M9：跑 "1.2.3-rc1" 的用户必须能收到正式版 "1.2.3" 更新。
+    每个点分标识符编码为 (0, 数字, "") 或 (1, 0, 字符串)，避免跨类型
+    比较抛 TypeError，并实现 SemVer 的「数字标识符 < 字母数字标识符」
+    与逐段比较。
+    """
+    m = _VERSION_RE.match(text or "")
+    if not m:
+        return ((0, 0, 0), 1, ())
+    triple = tuple(int(x) for x in m.groups()[:3])
+    suffix = m.group(4)
+    if not suffix:
+        return (triple, 1, ())  # type: ignore[return-value]
+    ids = tuple(
+        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        for part in suffix.lower().split(".")
+    )
+    return (triple, 0, ids)  # type: ignore[return-value]
 
 
 def is_newer(remote: str, current: str) -> bool:
-    return parse_version(remote) > parse_version(current)
+    return _release_key(remote) > _release_key(current)
 
 
 def canonical_version(tag: str) -> str:
