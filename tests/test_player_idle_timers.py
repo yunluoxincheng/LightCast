@@ -61,7 +61,7 @@ _SPINNER_SCRIPT = textwrap.dedent(
 _ANCHOR_SCRIPT = textwrap.dedent(
     """
     from PySide6.QtCore import QObject, Signal
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QWidget
 
     from ydlna.player.player_interface import PlayerInterface
 
@@ -125,24 +125,32 @@ _ANCHOR_SCRIPT = textwrap.dedent(
 
 
     app = QApplication([])
-    page = PlayerInterface(_FakePlayer())
+    host = QWidget()
+    page = PlayerInterface(_FakePlayer(), host)
 
     # 页面构造后处于隐藏状态：150ms 锚定定时器不得空转（M8）
     assert not page._anchor_timer.isActive(), "隐藏页面的锚定定时器在跑"
 
-    # 页面上屏（含 singleShot(0) 的 _on_page_shown 处理）→ 启动
+    # 隐藏宿主下 page.show()：showEvent 会触发（开机自启静默模式会切到
+    # 播放器页但不显示主窗口），但页面实际不可见，定时器必须保持停止
     page.show()
+    app.processEvents()
+    assert not page.isVisible()
+    assert not page._anchor_timer.isActive(), "隐藏宿主下的页面锚定定时器在跑"
+
+    # 宿主真正显示 → 级联 show → 页面实际可见 → 启动
+    host.show()
     app.processEvents()
     assert page.isVisible()
     assert page._anchor_timer.isActive(), "页面上屏后锚定定时器未启动"
 
     # 切走 → hideEvent → 停止
-    page.hide()
+    host.hide()
     app.processEvents()
     assert not page._anchor_timer.isActive(), "页面切走后锚定定时器仍在跑"
 
     # 切回 → 再次启动
-    page.show()
+    host.show()
     app.processEvents()
     assert page._anchor_timer.isActive(), "页面切回后锚定定时器未恢复"
     """

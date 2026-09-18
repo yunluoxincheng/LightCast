@@ -316,8 +316,10 @@ class PlayerInterface(QWidget):
     # ------------------------------------------------------------------ #
     def showEvent(self, event) -> None:  # noqa: N802, ANN001
         super().showEvent(event)
-        # 页面回到前台才恢复 150ms 锚定刷新（M8 省电：隐藏页不停表）
-        if not self._anchor_timer.isActive():
+        # 页面回到前台才恢复 150ms 锚定刷新（M8 省电：隐藏页不停表）。
+        # isVisible 门控：祖先窗口仍隐藏时 showEvent 也会触发（开机自启
+        # 静默模式会切到播放器页但不显示主窗口），此时不算真正上屏。
+        if self.isVisible() and not self._anchor_timer.isActive():
             self._anchor_timer.start()
         # 延迟到布局完成后恢复渲染区 + attach
         QTimer.singleShot(0, self._on_page_shown)

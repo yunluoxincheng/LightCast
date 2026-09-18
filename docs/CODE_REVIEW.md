@@ -239,7 +239,7 @@
 ### M8. 隐藏页面 / overlay 定时器不停（省电开销）
 
 - **文件**：`ydlna/player/player_interface.py:91-117, 254-266`
-- **状态**：`[x]` 已修复（2026-09-18）：`_Spinner` 定时器由自身 `showEvent`/`hideEvent` 启停（Qt 的 show/hide 事件会级联下发到子控件，已用探针确认；构造期不再无条件 `start()`——BufferingOverlay 构造即隐藏，旧实现下 30ms 定时器从进程启动起永久空转），showEvent 以 `isVisible()` 门控「宿主隐藏期间 show 不上屏」的路径；`_anchor_timer` 移除构造期 `start()`，改由页面 `showEvent` 启动、`hideEvent` 停止，切走/切回导航页即停/恢复。新增真实 QWidget 子进程回归测试覆盖两条定时器的启停时序。
+- **状态**：`[x]` 已修复（2026-09-18，含二审返工）：`_Spinner` 定时器由自身 `showEvent`/`hideEvent` 启停（Qt 的 show/hide 事件会级联下发到子控件，已用探针确认；构造期不再无条件 `start()`——BufferingOverlay 构造即隐藏，旧实现下 30ms 定时器从进程启动起永久空转），showEvent 以 `isVisible()` 门控「宿主隐藏期间 show 不上屏」的路径；`_anchor_timer` 移除构造期 `start()`，改由页面 `showEvent` 启动、`hideEvent` 停止，showEvent 同样以 `isVisible()` 门控——开机自启静默模式（`app.py::_ensure_mpv_ready`）会切到播放器页但不显示主窗口，该状态下定时器保持停止，主窗口真正显示后级联 showEvent 恢复。新增真实 QWidget 子进程回归测试覆盖两条定时器的启停时序（含隐藏宿主对称场景）。
 - **问题**：`_Spinner` 30ms 定时器、`_anchor_timer` 150ms 在页面 / overlay 隐藏时仍跑，笔记本
     省电场景下持续唤醒主线程做无谓重绘。
 - **建议**：`_Spinner` 加 `start()` / `stop()`，`BufferingOverlay` `showEvent` / `hideEvent` 调用；
