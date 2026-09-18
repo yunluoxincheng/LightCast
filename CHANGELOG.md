@@ -19,7 +19,7 @@
 
 ### 测试
 - 新增发布链路 dry-run 工作流：PR 触碰 `release.yml` 或 libmpv 下载脚本时，CI 会真实执行一次共享的下载 + x86_64 PE 校验，并用 64 位 Python 实际加载 DLL；libmpv 下载/选择/校验逻辑统一抽到 `tools/fetch_libmpv.ps1`，发布与预演共用同一份实现（0.1.29~0.1.32 的误选说明发布产物必须在发布前真实验证，仅靠文本断言不够）。
-- 新增致命对话框生产路径回归测试（真实调用 `ydlna.app._show_libmpv_missing_dialog`，验证原生无 parent `QMessageBox`、Critical 图标与 OK 按钮；若改回 qfluentwidgets `MessageBox(None)` 测试即失败，不锁定第三方库行为）与发布工作流回归测试（libmpv 必须限定 x86_64、必须有 PE 架构校验、发布必须调用共享脚本）；Windows CI 测试总数增至 241 项。
+- 新增致命对话框生产路径回归测试（真实调用 `ydlna.app._show_libmpv_missing_dialog`，验证原生无 parent `QMessageBox`、Critical 图标与 OK 按钮；若改回 qfluentwidgets `MessageBox(None)` 测试即失败，不锁定第三方库行为）与发布工作流回归测试（libmpv 必须限定 x86_64、必须有 PE 架构校验、发布必须调用共享脚本、dry-run 必须存在且做真实加载验证）；Windows CI 测试总数增至 242 项。
 
 ## [0.1.32] - 2026-09-18
 
