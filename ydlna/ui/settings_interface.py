@@ -121,7 +121,10 @@ class SettingsInterface(QWidget):
 
         self.audioDeviceCard = _SettingCard(tr("settings.audio_device"), tr("settings.audio_device.hint"))
         self.audioDeviceCombo = ComboBox()
-        self.audioDeviceCombo.setMinimumWidth(220)
+        # 固定宽度：Fluent ComboBox 选中长文本会 adjustSize 自行扩宽，
+        # 设备名动辄上百字符，会把整页内容再次撑出视口（横向滚动条已
+        # 禁用，溢出会直接把右侧控件裁掉）。完整名称在下拉展开时可见。
+        self.audioDeviceCombo.setFixedWidth(220)
         self.audioDeviceCard.setWidget(self.audioDeviceCombo)
 
         # ---- 自动更新 ----
