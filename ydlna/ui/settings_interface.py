@@ -40,7 +40,8 @@ class _SettingCard(CardWidget):
 
     def __init__(self, title: str, desc: str = "", parent=None) -> None:  # noqa: ANN001
         super().__init__(parent)
-        self.setFixedHeight(76)
+        # 高度随内容增长（长说明换行后卡片变高），76 是单行说明的标准高度
+        self.setMinimumHeight(76)
         lay = QGridLayout(self)
         lay.setContentsMargins(20, 14, 20, 14)
         lay.setHorizontalSpacing(16)
@@ -48,6 +49,9 @@ class _SettingCard(CardWidget):
         self.titleLabel = StrongBodyLabel(title)
         self.descLabel = BodyLabel(desc)
         self.descLabel.setEnabled(False)
+        # 必须换行：长说明（如投屏确认的完整规则）不换行会把卡片最小宽度
+        # 撑到 1000px+，滚动内容比视口宽，右侧控件全被裁出屏幕
+        self.descLabel.setWordWrap(True)
         lay.addWidget(self.titleLabel, 0, 0)
         lay.addWidget(self.descLabel, 1, 0)
         # 控件容器（外部 setWidget 放入）
@@ -88,6 +92,9 @@ class SettingsInterface(QWidget):
         self.scrollWidget = QWidget(self.scrollArea)
         self.scrollArea.setWidget(self.scrollWidget)
         self.scrollArea.setWidgetResizable(True)
+        # 设置内容只应纵向滚动；横向出滚动条即说明某控件把最小宽度撑爆
+        # （控件会被裁出屏幕），宁可内容换行也不允许横向裁切
+        self.scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         root = QVBoxLayout(self.scrollWidget)
         root.setContentsMargins(36, 24, 36, 24)
