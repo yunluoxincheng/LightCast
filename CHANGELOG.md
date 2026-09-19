@@ -11,6 +11,16 @@
 - 条目
 ```
 
+## [0.1.33] - 2026-09-19
+
+### 修复
+- 修复 v0.1.29 ~ v0.1.32 的安装包/便携包内置了 32 位（i686）`libmpv-2.dll`，导致全新安装后应用启动即报「libmpv 不可用」的问题：SourceForge 于 8 月 30 日上传的 i686 构建比此前的 x86_64 构建更新，发布脚本的「取最新且不含 v3」选择逻辑将其误选（PE 架构确认 x86，64 位进程加载报 WinError 193）。现在 RSS 选择强制限定 `x86_64`，解压后再读取 PE 头校验 `machine=0x8664`，非 x64 构建直接使构建失败。受影响的用户请重新安装本版本。
+- 修复 libmpv 不可用时致命错误对话框自身崩溃的问题：qfluentwidgets `MessageBox` 的 parent 传 `None` 会在构造时因 `parent.width()` 抛 `AttributeError`（`MaskDialogBase` 要求非空 parent），错误提示弹不出来、应用直接带着崩溃报告退出；现改用 Qt 原生无 parent `QMessageBox`，用户能看到可读的错误说明。
+
+### 测试
+- 新增发布链路 dry-run 工作流：PR 触碰 `release.yml` 或 libmpv 下载脚本时，CI 会真实执行一次共享的下载 + x86_64 PE 校验，并用 64 位 Python 实际加载 DLL；libmpv 下载/选择/校验逻辑统一抽到 `tools/fetch_libmpv.ps1`，发布与预演共用同一份实现（0.1.29~0.1.32 的误选说明发布产物必须在发布前真实验证，仅靠文本断言不够）。
+- 新增致命对话框生产路径回归测试（真实调用 `ydlna.app._show_libmpv_missing_dialog`，验证原生无 parent `QMessageBox`、Critical 图标与 OK 按钮；若改回 qfluentwidgets `MessageBox(None)` 测试即失败，不锁定第三方库行为）与发布工作流回归测试（libmpv 必须限定 x86_64、必须有 PE 架构校验、发布必须调用共享脚本、dry-run 必须存在且做真实加载验证）；Windows CI 测试总数增至 242 项。
+
 ## [0.1.32] - 2026-09-18
 
 ### 修复

@@ -231,32 +231,13 @@ jobs:
         if: steps.state.outputs.should_build == 'true'
         run: pip install -r requirements.txt pyinstaller
 
-      # libmpv-2.dll（约 110MB，不纳入仓库）：从 SourceForge 的 libmpv 目录
-      # 拉 RSS 取最新一个 dev 构建包，解压出 dll 放到 bin/
-      # 注意：优先标准版（非 v3），v3 精简版不含独立 dll
+      # libmpv-2.dll（约 110MB，不纳入仓库）：下载 + x86_64 选择 + PE 校验
+      # 统一在 tools/fetch_libmpv.ps1（与 release-dryrun.yml 共用同一份
+      # 逻辑，PR 预演即验证真实发布链路；0.1.29~0.1.32 曾误选 i686 构建）
       - name: Download libmpv-2.dll
         if: steps.state.outputs.should_build == 'true'
         shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path bin | Out-Null
-          $xml = [xml](curl.exe -sL 'https://sourceforge.net/projects/mpv-player-windows/rss?path=/libmpv')
-          $items = $xml.SelectNodes('//rss/channel/item')
-          $chosen = $null
-          foreach ($it in $items) {
-            $title = $it.SelectSingleNode('title').InnerText
-            if ($title -like '*.7z') {
-              if ($title -notlike '*v3*') { $chosen = $it; break }
-              if (-not $chosen) { $chosen = $it }
-            }
-          }
-          if (-not $chosen) { throw 'SourceForge libmpv 目录未找到 .7z 包' }
-          $title = $chosen.SelectSingleNode('title').InnerText
-          $url = $chosen.SelectSingleNode('link').InnerText
-          Write-Host "下载: $title"
-          curl.exe -sL $url -o libmpv.7z
-          if (-not (Test-Path 'libmpv.7z')) { throw 'libmpv.7z 下载失败' }
-          & 'C:\Program Files\7-Zip\7z.exe' e libmpv.7z "-obin" libmpv-2.dll -y
-          if (-not (Test-Path 'bin\libmpv-2.dll')) { throw '解压后未找到 libmpv-2.dll' }
+        run: ./tools/fetch_libmpv.ps1
 
       # 让「关于」页的版本号与 Release 标签一致
       - name: Sync app version
