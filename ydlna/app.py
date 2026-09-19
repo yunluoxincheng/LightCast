@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from functools import partial
 from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal, Slot
@@ -148,6 +149,92 @@ def _show_libmpv_missing_dialog() -> None:
     ).exec()
 
 
+def _present_window_for_dialog(window: Any) -> None:
+    """确认弹窗必须可见：静默托盘 / 最小化状态下先恢复窗口。"""
+    if window.isMinimized():
+        window.showNormal()
+    elif not window.isVisible():
+        window.show()
+    window.raise_()
+    window.activateWindow()
+
+
+async def _confirm_cast_dialog(
+    window: Any, controller_ip: str, url: str, title: str, *, timeout: float
+) -> bool:
+    """弹窗询问是否允许该控制点投屏；返回 True 放行，False/超时拒绝。
+
+    生命周期（0.1.28~0.1.33 确认后必崩的根因）：历史实现把
+    ``deleteLater`` 挂在 ``finished`` 信号上——用户点击后 C++ 对象被
+    销毁，本协程在下一个事件循环轮次才恢复，``clickedButton()`` 抛
+    「Internal C++ object already deleted」，门控把异常按拒绝处理，
+    确认框从未成功放行过。因此点击结果必须在 ``buttonClicked`` 信号
+    回调里**同步**捕获进普通 Python 变量，协程恢复后不再访问任何
+    C++ 方法；销毁时机由本协程 ``finally`` 控制（窗口已亡时
+    ``isValid`` 兜底）。
+    """
+    from PySide6.QtWidgets import QMessageBox
+    from qfluentwidgets import InfoBar, InfoBarPosition
+    from shiboken6 import isValid
+    from .i18n import tr
+
+    _present_window_for_dialog(window)
+    box = QMessageBox(window)
+    box.setWindowTitle(tr("dialog.cast_confirm.title"))
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setText(tr("dialog.cast_confirm.body", title=title, ip=controller_ip))
+    allow_btn = box.addButton(
+        tr("dialog.cast_confirm.allow"), QMessageBox.ButtonRole.AcceptRole
+    )
+    box.addButton(tr("common.cancel"), QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(allow_btn)
+
+    answered: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    clicked_allow = False
+
+    def _on_button_clicked(button) -> None:  # noqa: ANN001
+        nonlocal clicked_allow
+        clicked_allow = button is allow_btn
+        if not answered.done():
+            answered.set_result(None)
+
+    def _on_finished(*_a) -> None:
+        # Esc / 关闭窗口等不经 buttonClicked 的路径（语义=拒绝）
+        if not answered.done():
+            answered.set_result(None)
+
+    box.buttonClicked.connect(_on_button_clicked)
+    box.finished.connect(_on_finished)
+    # 非阻塞 open()：绝不 exec() 嵌套事件循环（qasync 下会冻结）
+    box.open()
+
+    try:
+        await asyncio.wait_for(answered, timeout=timeout)
+    except asyncio.TimeoutError:
+        log.info("投屏确认超时，已自动拒绝: controller=%s", controller_ip)
+        if isValid(box):
+            box.reject()
+        InfoBar.warning(
+            title=tr("dialog.cast_confirm.timeout"),
+            content=tr("dialog.cast_confirm.timeout.body", ip=controller_ip),
+            orient=Qt.Horizontal,
+            isClosable=True,
+            duration=6000,
+            parent=window,
+            position=InfoBarPosition.TOP,
+        )
+        return False
+    finally:
+        if isValid(box):
+            box.deleteLater()
+
+    log.info(
+        "投屏确认结果: %s controller=%s",
+        "允许" if clicked_allow else "拒绝", controller_ip,
+    )
+    return clicked_allow
+
+
 async def run() -> int:
     """主协程。在 qasync 的 QEventLoop 中运行。"""
     from PySide6.QtWidgets import QApplication
@@ -213,68 +300,9 @@ async def run() -> int:
     # 本次运行内不再打扰；超时未确认自动拒绝。授权后该控制点的全部状态
     # 变更 action（SetURI/Play/Pause/Stop/Seek/Volume/Mute）才被放行。
     CAST_CONFIRM_TIMEOUT = 30.0
-
-    def _present_window_for_dialog() -> None:
-        """确认弹窗必须可见：静默托盘 / 最小化状态下先恢复窗口。"""
-        if window.isMinimized():
-            window.showNormal()
-        elif not window.isVisible():
-            window.show()
-        window.raise_()
-        window.activateWindow()
-
-    async def _confirm_cast_dialog(
-        controller_ip: str, url: str, title: str
-    ) -> bool:
-        """弹窗询问是否允许该控制点投屏；返回 True 放行，False/超时拒绝。"""
-        from PySide6.QtWidgets import QMessageBox
-        from qfluentwidgets import InfoBar, InfoBarPosition
-        from .i18n import tr
-
-        _present_window_for_dialog()
-        box = QMessageBox(window)
-        box.setWindowTitle(tr("dialog.cast_confirm.title"))
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setText(
-            tr("dialog.cast_confirm.body", title=title, ip=controller_ip)
-        )
-        allow_btn = box.addButton(
-            tr("dialog.cast_confirm.allow"), QMessageBox.ButtonRole.AcceptRole
-        )
-        box.addButton(tr("common.cancel"), QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(allow_btn)
-
-        answered: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        box.finished.connect(
-            lambda *_a: None if answered.done() else answered.set_result(None)
-        )
-        box.finished.connect(box.deleteLater)
-        # 非阻塞 open()：绝不 exec() 嵌套事件循环（qasync 下会冻结）
-        box.open()
-
-        try:
-            await asyncio.wait_for(answered, timeout=CAST_CONFIRM_TIMEOUT)
-        except asyncio.TimeoutError:
-            box.reject()
-            log.info("投屏确认超时，已自动拒绝: controller=%s", controller_ip)
-            InfoBar.warning(
-                title=tr("dialog.cast_confirm.timeout"),
-                content=tr("dialog.cast_confirm.timeout.body", ip=controller_ip),
-                orient=Qt.Horizontal,
-                isClosable=True,
-                duration=6000,
-                parent=window,
-                position=InfoBarPosition.TOP,
-            )
-            return False
-        allowed = box.clickedButton() is allow_btn
-        log.info(
-            "投屏确认结果: %s controller=%s",
-            "允许" if allowed else "拒绝", controller_ip,
-        )
-        return allowed
-
-    bridge.cast_gate = _confirm_cast_dialog
+    bridge.cast_gate = partial(
+        _confirm_cast_dialog, window, timeout=CAST_CONFIRM_TIMEOUT
+    )
 
     # DLNA 投屏到达 → 切到播放器页（内嵌渲染区）
     def on_cast(title: str, url: str) -> None:
