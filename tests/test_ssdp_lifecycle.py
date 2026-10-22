@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -88,6 +89,38 @@ def test_ssdp_stop_sends_byebye_joins_thread_and_closes_resources(
     assert receiver.closed is True
     assert sender.closed is True
     assert any(b"NTS: ssdp:byebye" in packet for packet in sender.packets)
+
+
+def test_ssdp_notify_location_uses_each_sender_ip() -> None:
+    listener = _listener()
+
+    class Sender:
+        def __init__(self, ip: str) -> None:
+            self.ip = ip
+            self.packets: list[bytes] = []
+
+        def send(self, data: bytes) -> None:
+            self.packets.append(data)
+
+    senders = [Sender("192.168.1.10"), Sender("10.8.0.2")]
+    listener._senders = senders  # type: ignore[assignment]  # noqa: SLF001
+
+    listener._notify_alive()  # noqa: SLF001
+    # 未启动监听线程；替代 stop() 的唤醒 socket，整个检查不访问真实网络。
+    with patch("ydlna.dlna.ssdp_listener.socket.socket"):
+        listener.stop()
+
+    for sender in senders:
+        assert len(sender.packets) == 12
+        expected = f"LOCATION: http://{sender.ip}:12345/device.xml".encode()
+        nts_counts = {b"NTS: ssdp:alive": 0, b"NTS: ssdp:byebye": 0}
+        for packet in sender.packets:
+            headers = packet.split(b"\r\n")
+            assert expected in headers
+            assert b"{IP}" not in packet
+            for nts in nts_counts:
+                nts_counts[nts] += headers.count(nts)
+        assert nts_counts == {b"NTS: ssdp:alive": 6, b"NTS: ssdp:byebye": 6}
 
 
 def test_ssdp_stop_prevents_waiting_alive_after_byebye(monkeypatch) -> None:

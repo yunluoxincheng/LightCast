@@ -341,7 +341,7 @@ class SsdpListener(threading.Thread):
                 packet = self._build_notify(st, alive=True)
                 for sender in self._senders:
                     # LOCATION 里的 IP 用 sender 绑定的网卡 IP
-                    p = packet.replace(b"{{IP}}", sender.ip.encode())
+                    p = packet.replace(b"{IP}", sender.ip.encode())
                     sender.send(p)
             sender_count = len(self._senders)
         log.debug("已多播 NOTIFY alive（%d 个 ST × %d 个网卡）",
@@ -349,7 +349,7 @@ class SsdpListener(threading.Thread):
 
     def _build_notify(self, st: str, alive: bool) -> bytes:
         usn = f"uuid:{self._uuid}::{st}" if st.startswith("urn:") or st == "upnp:rootdevice" else f"uuid:{self._uuid}"
-        # {{IP}} 占位符在发送时按各 sender 的网卡 IP 替换
+        # f-string 中的 {{IP}} 生成 {IP} 占位符，发送时按各 sender 的网卡 IP 替换
         location = f"http://{{IP}}:{self._http_port}{self._location_path}"
         lines = [
             "NOTIFY * HTTP/1.1",
@@ -385,7 +385,7 @@ class SsdpListener(threading.Thread):
             for st in self._st_list:
                 packet = self._build_notify(st, alive=False)
                 for sender in self._senders:
-                    sender.send(packet.replace(b"{{IP}}", sender.ip.encode()))
+                    sender.send(packet.replace(b"{IP}", sender.ip.encode()))
             self._running.clear()
 
         # 发个空包唤醒阻塞的 recvfrom（虽然 settimeout(1) 会自己醒，保险起见）
